@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IT Asset Inventory — Iris</title>
+    <script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        :root {
+            --bg: #f4f6fa; --panel: #ffffff; --ink: #1f2733; --muted: #6b7688;
+            --line: #e3e8f0; --brand: #2563eb; --brand-ink: #ffffff;
+            --ok: #15803d; --okbg: #dcfce7; --warn: #b45309; --warnbg: #fef3c7;
+            --bad: #b91c1c; --badbg: #fee2e2; --info: #1e40af; --infobg: #dbeafe;
+            --shadow: 0 1px 3px rgba(16,24,40,.08), 0 1px 2px rgba(16,24,40,.06);
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--ink); font-size: 14px; }
+        a { color: var(--brand); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        button { font-family: inherit; font-size: 13px; cursor: pointer; }
+        .btn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 7px 13px; border-radius: 7px; }
+        .btn:hover { border-color: #c4ccd8; }
+        .btn.primary { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); }
+        .btn.primary:hover { background: #1d4fd7; }
+        .btn.danger { color: var(--bad); border-color: #f0c2c2; }
+        .btn.sm { padding: 4px 9px; font-size: 12px; border-radius: 6px; }
+        input, select, textarea { font-family: inherit; font-size: 13px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink); width: 100%; }
+        textarea { min-height: 62px; resize: vertical; }
+        label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 4px; font-weight: 600; }
+        /* Layout */
+        #loading, #signin { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; }
+        #app { display: none; grid-template-columns: 232px 1fr; min-height: 100vh; }
+        #sidebar { background: #0f172a; color: #cbd5e1; padding: 18px 12px; position: sticky; top: 0; height: 100vh; }
+        #sidebar .brand { color: #fff; font-weight: 800; font-size: 16px; padding: 4px 10px 16px; letter-spacing: .2px; }
+        #sidebar .brand small { display: block; font-weight: 500; color: #94a3b8; font-size: 11px; margin-top: 2px; }
+        #sidebar nav a { display: flex; align-items: center; gap: 10px; color: #cbd5e1; padding: 9px 11px; border-radius: 8px; margin-bottom: 2px; font-weight: 600; }
+        #sidebar nav a:hover { background: #1e293b; text-decoration: none; color: #fff; }
+        #sidebar nav a.active { background: var(--brand); color: #fff; }
+        #sidebar .who { position: absolute; bottom: 14px; left: 12px; right: 12px; font-size: 11px; color: #94a3b8; border-top: 1px solid #1e293b; padding-top: 10px; }
+        #sidebar .who a { color: #93c5fd; }
+        main { padding: 22px 26px 60px; overflow: auto; }
+        .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+        .page-head h1 { font-size: 20px; margin: 0; }
+        .page-head .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+        .toolbar .search { flex: 1; min-width: 200px; max-width: 340px; }
+        /* Cards / tiles */
+        .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); }
+        .tile .k { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+        .tile .v { font-size: 26px; font-weight: 800; margin-top: 4px; }
+        .tile .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+        .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden; }
+        .panel h2 { font-size: 14px; margin: 0; padding: 13px 16px; border-bottom: 1px solid var(--line); background: #fafbfd; }
+        .panel .body { padding: 14px 16px; }
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+        th { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); background: #fafbfd; position: sticky; top: 0; }
+        tbody tr:hover { background: #f8fafc; }
+        .table-wrap { overflow-x: auto; }
+        .filter-row th { padding: 5px 8px; background: #fff; }
+        .filter-row input { padding: 4px 7px; font-size: 12px; }
+        /* Badges */
+        .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+        .b-ok { background: var(--okbg); color: var(--ok); }
+        .b-warn { background: var(--warnbg); color: var(--warn); }
+        .b-bad { background: var(--badbg); color: var(--bad); }
+        .b-info { background: var(--infobg); color: var(--info); }
+        .b-mut { background: #eef1f6; color: var(--muted); }
+        /* Modal */
+        .modal-bg { display: none; position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 50; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; }
+        .modal-bg.open { display: flex; }
+        .modal { background: #fff; border-radius: 14px; width: 100%; max-width: 720px; box-shadow: 0 20px 50px rgba(16,24,40,.28); }
+        .modal.wide { max-width: 940px; }
+        .modal .m-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+        .modal .m-head h3 { margin: 0; font-size: 16px; }
+        .modal .m-head .x { border: none; background: none; font-size: 22px; color: var(--muted); line-height: 1; }
+        .modal .m-body { padding: 18px; }
+        .modal .m-foot { padding: 14px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+        .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+        .field { margin-bottom: 12px; }
+        .fs { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+        .fs > legend { font-size: 12px; font-weight: 700; color: var(--muted); padding: 0 6px; text-transform: uppercase; letter-spacing: .4px; }
+        /* People picker */
+        .people-results { border: 1px solid var(--line); border-radius: 8px; margin-top: 4px; max-height: 210px; overflow: auto; }
+        .people-results .p { padding: 8px 10px; cursor: pointer; border-bottom: 1px solid var(--line); }
+        .people-results .p:hover { background: #f1f5ff; }
+        .people-results .p small { color: var(--muted); display: block; }
+        /* Toast */
+        #toast { position: fixed; bottom: 22px; right: 22px; z-index: 90; display: flex; flex-direction: column; gap: 8px; }
+        #toast .t { background: #0f172a; color: #fff; padding: 11px 16px; border-radius: 9px; box-shadow: var(--shadow); font-size: 13px; max-width: 360px; }
+        #toast .t.ok { background: #15803d; } #toast .t.bad { background: #b91c1c; }
+        .muted { color: var(--muted); } .right { text-align: right; } .nowrap { white-space: nowrap; }
+        .empty { text-align: center; color: var(--muted); padding: 30px; }
+        .pill-row { display: flex; gap: 6px; flex-wrap: wrap; }
+        .views-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; margin-bottom: 8px; }
+        .views-bar .chip { background: #eef1f6; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+        .views-bar .chip:hover { border-color: var(--brand); }
+        @media (max-width: 760px) { #app { grid-template-columns: 1fr; } #sidebar { position: static; height: auto; } .grid2, .grid3 { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div style="font-size:34px">💻</div>
+        <div id="loadingMsg">Loading IT Asset Inventory…</div>
+    </div>
+    <div id="signin" style="display:none">
+        <div style="font-size:34px">💻</div>
+        <h2 style="margin:0">IT Asset Inventory</h2>
+        <p class="muted" style="max-width:360px">Sign in with your Iris Microsoft 365 account to manage IT assets, custody, sparing and disposal.</p>
+        <button class="btn primary" id="signinBtn" style="display:none" onclick="doSignIn()">Sign in with Microsoft</button>
+    </div>
+
+    <div id="app">
+        <aside id="sidebar">
+            <div class="brand">💻 IT Assets<small>Iris — corporate lifecycle</small></div>
+            <nav id="nav"></nav>
+            <div class="who" id="who"></div>
+        </aside>
+        <main id="content"></main>
+    </div>
+
+    <div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeModal()">
+        <div class="modal" id="modal"></div>
+    </div>
+    <div id="toast"></div>
+
+    <script>
+    /* ============================================================================
+       IT Asset Inventory — single-file app, SharePoint (Graph) backed.
+       Same architecture as NetInventory: MSAL auth, SharePointDataStore over Graph,
+       localStorage is a 5-min cache ONLY. Data of record lives in SharePoint lists.
+       ============================================================================ */
+
+    const CONFIG = {
+        clientId: 'f0bc695d-e675-4aa8-a114-8b7935183c30',   // shared Iris SPA app reg (add this Pages URL as a redirect URI)
+        tenantId: 'iristransport.onmicrosoft.com',
+        hostname: 'iristransport.sharepoint.com',
+        sitePath: 'sites/itsite',                            // resolved to a composite site id at runtime
+        pagesUrl: 'https://iris-eli.github.io/itinventory/', // public deploy URL (redirect + QR deep-link base)
+        siteId: null,                                        // filled by resolveSiteId()
+        listNames: {
+            assets: 'ITAssets_Assets',
+            assignments: 'ITAssets_Assignments',
+            sparing: 'ITAssets_SparingTargets',
+            locations: 'ITAssets_Locations',
+            disposals: 'ITAssets_Disposals'
+        },
+        fieldMappings: {
+            assets: {
+                assetTag: 'Title', serialNumber: 'SerialNumber', category: 'Category', make: 'Make', model: 'Model',
+                status: 'Status', condition: 'Condition', expectReturn: 'ExpectReturn',
+                assignedToName: 'AssignedToName', assignedToUpn: 'AssignedToUPN', assignedToAadId: 'AssignedToAADId',
+                assignedDate: 'AssignedDate', locationId: 'LocationId', poNumber: 'PONumber', vendor: 'Vendor',
+                purchaseDate: 'PurchaseDate', purchaseCost: 'PurchaseCost', depreciationYears: 'DepreciationYears',
+                salvageValue: 'SalvageValue', warrantyExpiration: 'WarrantyExpiration', retiredDate: 'RetiredDate',
+                disposalMethod: 'DisposalMethod', dataWipeStatus: 'DataWipeStatus', notes: 'Notes'
+            },
+            assignments: {
+                key: 'Title', assetTag: 'AssetTag', personName: 'PersonName', personUpn: 'PersonUPN',
+                personAadId: 'PersonAADId', issuedDate: 'IssuedDate', returnedDate: 'ReturnedDate',
+                conditionOut: 'ConditionOut', conditionIn: 'ConditionIn', issuedBy: 'IssuedBy', notes: 'Notes'
+            },
+            sparing: { key: 'Title', category: 'Category', model: 'Model', minQty: 'MinQty', targetQty: 'TargetQty', notes: 'Notes' },
+            locations: { locId: 'Title', locType: 'LocType', address: 'Address', notes: 'Notes' },
+            disposals: {
+                key: 'Title', assetTag: 'AssetTag', serialNumber: 'SerialNumber', retiredDate: 'RetiredDate',
+                disposalMethod: 'DisposalMethod', dataWipeStatus: 'DataWipeStatus', dataWipeMethod: 'DataWipeMethod',
+                certRef: 'CertRef', disposedBy: 'DisposedBy', notes: 'Notes'
+            }
+        },
+        // Numeric/date columns: '' must become null on write (Graph rejects '' for these types).
+        nonTextCols: new Set(['PurchaseCost','SalvageValue','DepreciationYears','MinQty','TargetQty',
+            'AssignedDate','PurchaseDate','WarrantyExpiration','RetiredDate','IssuedDate','ReturnedDate']),
+        cacheTimeout: 5 * 60 * 1000
+    };
+
+    const STATUSES = ['In Stock','Deployed','In Repair','Spare','Reserved','Retired','Lost','Disposed'];
+    const CATEGORIES = ['Laptop','Desktop','Monitor','Phone','Tablet','Dock','Peripheral','Server','Network','Other'];
+    const CONDITIONS = ['New','Good','Fair','Poor','Damaged'];
+    const LOC_TYPES = ['Office','Storage','Home','Warehouse','Vendor'];
+    const DISPOSAL_METHODS = ['Recycle','Return','Destroy','Donate','Sell'];
+    const WIPE_STATUSES = ['Wiped','Destroyed','N/A'];
+
+    /* ------------------------------------------------------------------ MSAL */
+    const msalConfig = {
+        auth: { clientId: CONFIG.clientId, authority: `https://login.microsoftonline.com/${CONFIG.tenantId}`, redirectUri: CONFIG.pagesUrl },
+        cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
+    };
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+    const loginRequest = { scopes: ['Sites.ReadWrite.All', 'User.Read', 'User.ReadBasic.All'] };
+    let accessToken = null, currentUser = null;
+
+    (async function initApp() {
+        try {
+            const resp = await msalInstance.handleRedirectPromise();
+            if (resp) { currentUser = resp.account; accessToken = resp.accessToken; msalInstance.setActiveAccount(currentUser); return start(); }
+            const accts = msalInstance.getAllAccounts();
+            if (accts.length) {
+                currentUser = accts[0]; msalInstance.setActiveAccount(currentUser);
+                try { const t = await msalInstance.acquireTokenSilent({ ...loginRequest, account: currentUser }); accessToken = t.accessToken; return start(); }
+                catch (e) { return showSignIn(); }
+            }
+            showSignIn();
+        } catch (e) { console.error('init', e); showSignIn(); }
+    })();
+
+    function showSignIn() {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('signin').style.display = 'flex';
+        document.getElementById('signinBtn').style.display = 'block';
+    }
+    function doSignIn() { msalInstance.loginRedirect(loginRequest); }
+
+    async function getToken() {
+        try { const t = await msalInstance.acquireTokenSilent({ ...loginRequest, account: currentUser }); accessToken = t.accessToken; return accessToken; }
+        catch (e) { msalInstance.acquireTokenRedirect(loginRequest); throw e; }
+    }
+
+    async function graphFetch(endpoint, options = {}, retry = true) {
+        const url = endpoint.startsWith('http') ? endpoint : `https://graph.microsoft.com/v1.0${endpoint}`;
+        const headers = Object.assign({ 'Authorization': `Bearer ${accessToken}` }, options.headers || {});
+        if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+        const res = await fetch(url, { ...options, headers });
+        if (res.status === 401 && retry) { await getToken(); return graphFetch(endpoint, options, false); }
+        if (!res.ok) { const txt = await res.text(); throw new Error(`Graph ${res.status}: ${txt.slice(0, 300)}`); }
+        if (res.status === 204) return null;
+        const ct = res.headers.get('content-type') || '';
+        return ct.includes('json') ? res.json() : res.text();
+    }
+
+    async function resolveSiteId() {
+        if (CONFIG.siteId) return CONFIG.siteId;
+        const cached = localStorage.getItem('itinv_siteId');
+        if (cached) { CONFIG.siteId = cached; return cached; }
+        const site = await graphFetch(`/sites/${CONFIG.hostname}:/${CONFIG.sitePath}`);
+        CONFIG.siteId = site.id; localStorage.setItem('itinv_siteId', site.id);
+        return site.id;
+    }
+
+    /* --------------------------------------------------- SharePoint data store */
+    class SharePointDataStore {
+        constructor() { this.cache = {}; this.cacheAt = {}; }
+        _list(entity) { return CONFIG.listNames[entity]; }
+        _sanitize(fields) {
+            const out = {};
+            for (const [col, v] of Object.entries(fields)) {
+                if (v === '' && CONFIG.nonTextCols.has(col)) { out[col] = null; continue; }
+                if (v === '' && col !== 'Title') { out[col] = null; continue; }
+                out[col] = v;
+            }
+            return out;
+        }
+        mapFromSharePoint(entity, item) {
+            const map = CONFIG.fieldMappings[entity], f = item.fields || {};
+            const o = { _spItemId: item.id, _modified: item.lastModifiedDateTime, _created: item.createdDateTime,
+                        _modifiedBy: (item.lastModifiedBy && item.lastModifiedBy.user && item.lastModifiedBy.user.displayName) || '' };
+            for (const [app, col] of Object.entries(map)) o[app] = (f[col] !== undefined && f[col] !== null) ? f[col] : '';
+            return o;
+        }
+        mapToSharePoint(entity, obj) {
+            const map = CONFIG.fieldMappings[entity], fields = {};
+            for (const [app, col] of Object.entries(map)) { if (obj[app] !== undefined) fields[col] = obj[app]; }
+            return this._sanitize(fields);
+        }
+        async getAll(entity, force = false) {
+            if (!force && this.cache[entity] && (Date.now() - this.cacheAt[entity] < CONFIG.cacheTimeout)) return this.cache[entity];
+            await resolveSiteId();
+            let endpoint = `/sites/${CONFIG.siteId}/lists/${this._list(entity)}/items?expand=fields&$top=5000`;
+            const rows = [];
+            while (endpoint) {
+                const data = await graphFetch(endpoint);
+                (data.value || []).forEach(it => rows.push(this.mapFromSharePoint(entity, it)));
+                endpoint = data['@odata.nextLink'] ? data['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null;
+            }
+            this.cache[entity] = rows; this.cacheAt[entity] = Date.now();
+            return rows;
+        }
+        async add(entity, obj) {
+            await resolveSiteId();
+            const fields = this.mapToSharePoint(entity, obj);
+            const res = await graphFetch(`/sites/${CONFIG.siteId}/lists/${this._list(entity)}/items`, { method: 'POST', body: JSON.stringify({ fields }) });
+            this.clear(entity); return res;
+        }
+        async update(entity, spItemId, obj) {
+            await resolveSiteId();
+            const fields = this.mapToSharePoint(entity, obj);
+            const res = await graphFetch(`/sites/${CONFIG.siteId}/lists/${this._list(entity)}/items/${spItemId}/fields`, { method: 'PATCH', body: JSON.stringify(fields) });
+            this.clear(entity); return res;
+        }
+        async remove(entity, spItemId) {
+            await resolveSiteId();
+            await graphFetch(`/sites/${CONFIG.siteId}/lists/${this._list(entity)}/items/${spItemId}`, { method: 'DELETE' });
+            this.clear(entity);
+        }
+        clear(entity) { if (entity) { delete this.cache[entity]; } else { this.cache = {}; } }
+    }
+    const store = new SharePointDataStore();
+
+    /* ------------------------------------------------- Entra/M365 people picker */
+    async function searchDirectoryPeople(query) {
+        if (!query || query.length < 2) return [];
+        const q = encodeURIComponent(query.replace(/'/g, "''"));
+        const filter = `startswith(displayName,'${q}') or startswith(mail,'${q}') or startswith(userPrincipalName,'${q}')`;
+        const data = await graphFetch(`/users?$filter=${filter}&$top=12&$select=id,displayName,userPrincipalName,mail,jobTitle`);
+        return data.value || [];
+    }
+
+    /* ---------------------------------------------------------------- utilities */
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    function fmtDate(v) { if (!v) return ''; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); }
+    function toDateInput(v) { if (!v) return ''; const d = new Date(v); return isNaN(d) ? '' : d.toISOString().slice(0, 10); }
+    function fromDateInput(v) { return v ? new Date(v + 'T12:00:00Z').toISOString() : ''; }
+    function money(v) { const n = Number(v); return isNaN(n) || v === '' || v == null ? '' : n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }); }
+    function toast(msg, kind = '') { const t = document.createElement('div'); t.className = 't ' + kind; t.textContent = msg; document.getElementById('toast').appendChild(t); setTimeout(() => t.remove(), 4200); }
+    function statusBadge(s) {
+        const map = { 'In Stock': 'b-info', 'Deployed': 'b-ok', 'In Repair': 'b-warn', 'Spare': 'b-info', 'Reserved': 'b-mut', 'Retired': 'b-mut', 'Lost': 'b-bad', 'Disposed': 'b-bad' };
+        return `<span class="badge ${map[s] || 'b-mut'}">${esc(s || '—')}</span>`;
+    }
+
+    /* ------------------------------------------------------------------- finance */
+    function bookValue(asset) {
+        const cost = Number(asset.purchaseCost); if (!cost || isNaN(cost)) return null;
+        const salvage = Number(asset.salvageValue) || 0;
+        const years = Number(asset.depreciationYears) || 0;
+        if (!years || !asset.purchaseDate) return cost; // no schedule -> carry at cost
+        const ageMs = Date.now() - new Date(asset.purchaseDate).getTime();
+        const ageYears = Math.max(0, ageMs / (365.25 * 24 * 3600 * 1000));
+        const depreciable = cost - salvage;
+        const bv = cost - depreciable * Math.min(ageYears, years) / years;
+        return Math.max(salvage, Math.round(bv));
+    }
+
+    /* -------------------------------------------------------------------- modal */
+    function openModal(html, wide) {
+        const m = document.getElementById('modal'); m.className = 'modal' + (wide ? ' wide' : ''); m.innerHTML = html;
+        document.getElementById('modalBg').classList.add('open');
+    }
+    function closeModal() { document.getElementById('modalBg').classList.remove('open'); document.getElementById('modal').innerHTML = ''; }
+
+    /* --------------------------------------------- column filters + saved views */
+    function enableColumnFilters(table, viewKey) {
+        if (!table || table._filtersOn) return; table._filtersOn = true;
+        const thead = table.tHead; if (!thead) return;
+        const headRow = thead.rows[0]; const cols = headRow.cells.length;
+        const fr = thead.insertRow(); fr.className = 'filter-row';
+        for (let i = 0; i < cols; i++) {
+            const th = document.createElement('th');
+            const isActions = /action/i.test(headRow.cells[i].textContent);
+            if (!isActions) {
+                const inp = document.createElement('input'); inp.placeholder = 'Filter…'; inp.dataset.col = i;
+                inp.addEventListener('input', () => applyTableFilters(table));
+                th.appendChild(inp);
+            }
+            fr.appendChild(th);
+        }
+        table._viewKey = viewKey;
+        if (viewKey) renderViewsBar(table, viewKey);
+    }
+    function applyTableFilters(table) {
+        const inputs = [...table.querySelectorAll('.filter-row input')];
+        const term = (table._searchTerm || '').toLowerCase();
+        [...table.tBodies[0].rows].forEach(r => {
+            let show = true;
+            inputs.forEach(inp => { const v = inp.value.trim().toLowerCase(); if (v && !(r.cells[+inp.dataset.col]?.textContent || '').toLowerCase().includes(v)) show = false; });
+            if (show && term && !r.textContent.toLowerCase().includes(term)) show = false;
+            r.style.display = show ? '' : 'none';
+        });
+    }
+    function renderViewsBar(table, viewKey) {
+        const wrap = document.createElement('div'); wrap.className = 'views-bar';
+        const store = JSON.parse(localStorage.getItem('itinv_views_' + viewKey) || '{}');
+        wrap.innerHTML = '<strong>⭐ Views:</strong>';
+        Object.keys(store).forEach(name => {
+            const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = name;
+            chip.onclick = () => { const f = store[name]; [...table.querySelectorAll('.filter-row input')].forEach(inp => { inp.value = f[inp.dataset.col] || ''; }); applyTableFilters(table); };
+            const del = document.createElement('span'); del.textContent = ' ✕'; del.style.color = '#b91c1c'; del.style.cursor = 'pointer';
+            del.onclick = (e) => { e.stopPropagation(); delete store[name]; localStorage.setItem('itinv_views_' + viewKey, JSON.stringify(store)); wrap.remove(); renderViewsBar(table, viewKey); };
+            chip.appendChild(del); wrap.appendChild(chip);
+        });
+        const save = document.createElement('span'); save.className = 'chip'; save.textContent = '+ Save current';
+        save.onclick = () => { const name = prompt('Name this view:'); if (!name) return; const f = {}; [...table.querySelectorAll('.filter-row input')].forEach(inp => { if (inp.value.trim()) f[inp.dataset.col] = inp.value.trim(); }); store[name] = f; localStorage.setItem('itinv_views_' + viewKey, JSON.stringify(store)); wrap.remove(); renderViewsBar(table, viewKey); };
+        wrap.appendChild(save);
+        table.parentNode.insertBefore(wrap, table);
+    }
+
+    /* ------------------------------------------------------------------ routing */
+    const ROUTES = [
+        { key: 'dashboard', icon: '📊', label: 'Dashboard' },
+        { key: 'assets', icon: '💻', label: 'Assets' },
+        { key: 'assignments', icon: '🔄', label: 'Assignments' },
+        { key: 'spares', icon: '📦', label: 'Spares' },
+        { key: 'locations', icon: '📍', label: 'Locations' },
+        { key: 'health', icon: '🩺', label: 'Health' },
+        { key: 'activity', icon: '📝', label: 'Activity' }
+    ];
+    function parseRoute() {
+        const h = (location.hash || '').replace(/^#\/?/, '');
+        const parts = h.split('/').filter(Boolean);
+        return { page: parts[0] || 'dashboard', id: parts[1] ? decodeURIComponent(parts[1]) : null };
+    }
+    function go(hash) { location.hash = hash; }
+    window.addEventListener('hashchange', router);
+
+    function renderNav() {
+        const cur = parseRoute().page;
+        document.getElementById('nav').innerHTML = ROUTES.map(r =>
+            `<a class="${r.key === cur ? 'active' : ''}" href="#/${r.key}"><span>${r.icon}</span> ${r.label}</a>`).join('');
+        document.getElementById('who').innerHTML =
+            `${esc(currentUser?.name || currentUser?.username || '')}<br><a href="#" onclick="signOut();return false">Sign out</a>`;
+    }
+    function signOut() { msalInstance.logoutRedirect(); }
+
+    async function start() {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('signin').style.display = 'none';
+        document.getElementById('app').style.display = 'grid';
+        try { await resolveSiteId(); } catch (e) { toast('Could not resolve the itsite SharePoint site — check access/permissions.', 'bad'); }
+        if (!location.hash) go('#/dashboard');
+        router();
+    }
+
+    async function router() {
+        renderNav();
+        const { page, id } = parseRoute();
+        const el = document.getElementById('content');
+        el.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+            if (page === 'dashboard') return renderDashboard(el);
+            if (page === 'assets') return id ? viewAssetDetails(el, id) : renderAssetsPage(el);
+            if (page === 'asset') return viewAssetDetails(el, id);
+            if (page === 'assignments') return renderAssignmentsPage(el);
+            if (page === 'spares') return renderSparesPage(el);
+            if (page === 'locations') return renderLocationsPage(el);
+            if (page === 'health') return renderHealthPage(el);
+            if (page === 'activity') return renderActivityPage(el);
+            el.innerHTML = '<div class="empty">Not found.</div>';
+        } catch (e) { console.error(e); el.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; }
+    }
+
+    /* ---------------------------------------------------------------- Dashboard */
+    async function renderDashboard(el) {
+        const [assets, spares] = await Promise.all([store.getAll('assets'), store.getAll('sparing')]);
+        const byStatus = {}; STATUSES.forEach(s => byStatus[s] = 0);
+        assets.forEach(a => { byStatus[a.status] = (byStatus[a.status] || 0) + 1; });
+        const active = assets.filter(a => !['Retired', 'Disposed', 'Lost'].includes(a.status));
+        const totalBook = active.reduce((s, a) => s + (bookValue(a) || 0), 0);
+        // warranty expiring
+        const now = Date.now(), d30 = now + 30 * 864e5, d60 = now + 60 * 864e5;
+        const warr = assets.filter(a => a.warrantyExpiration && new Date(a.warrantyExpiration).getTime() <= d60 && !['Disposed', 'Retired'].includes(a.status))
+            .sort((a, b) => new Date(a.warrantyExpiration) - new Date(b.warrantyExpiration));
+        // low spares
+        const lowSpare = computeSpareGaps(assets, spares).filter(g => g.gap > 0);
+
+        el.innerHTML = `
+        <div class="page-head"><h1>Dashboard</h1>
+          <div class="actions"><button class="btn" onclick="store.clear();router()">↻ Refresh</button></div></div>
+        <div class="tiles">
+          <div class="tile"><div class="k">Total assets</div><div class="v">${assets.length}</div><div class="sub">${active.length} active</div></div>
+          <div class="tile"><div class="k">Deployed</div><div class="v">${byStatus['Deployed'] || 0}</div><div class="sub">in use by staff</div></div>
+          <div class="tile"><div class="k">In stock + spare</div><div class="v">${(byStatus['In Stock'] || 0) + (byStatus['Spare'] || 0)}</div><div class="sub">available</div></div>
+          <div class="tile"><div class="k">In repair</div><div class="v">${byStatus['In Repair'] || 0}</div><div class="sub">out for service</div></div>
+          <div class="tile"><div class="k">Fleet book value</div><div class="v">${money(totalBook) || '$0'}</div><div class="sub">depreciated, active only</div></div>
+          <div class="tile"><div class="k">Low-spare models</div><div class="v">${lowSpare.length}</div><div class="sub">below min qty</div></div>
+        </div>
+        <div class="panel"><h2>⚠️ Low spares (below minimum)</h2><div class="body">${lowSpare.length ? `<div class="table-wrap"><table><thead><tr><th>Category</th><th>Model</th><th class="right">On hand</th><th class="right">Min</th><th class="right">Target</th><th class="right">Order</th></tr></thead><tbody>${lowSpare.map(g => `<tr><td>${esc(g.category)}</td><td>${esc(g.model || '—')}</td><td class="right">${g.onHand}</td><td class="right">${g.min}</td><td class="right">${g.target}</td><td class="right"><strong>${g.gap}</strong></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">All spare levels are at or above minimum. 🎉</div>'}</div></div>
+        <div class="panel"><h2>⏰ Warranty expiring (next 60 days)</h2><div class="body">${warr.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Category</th><th>Model</th><th>Assigned to</th><th>Expires</th></tr></thead><tbody>${warr.map(a => { const soon = new Date(a.warrantyExpiration).getTime() <= d30; return `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${esc(a.category)}</td><td>${esc(a.model)}</td><td>${esc(a.assignedToName || '—')}</td><td><span class="badge ${soon ? 'b-bad' : 'b-warn'}">${fmtDate(a.warrantyExpiration)}</span></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No warranties expiring within 60 days.</div>'}</div></div>`;
+    }
+
+    /* ------------------------------------------------------------------- Assets */
+    async function renderAssetsPage(el) {
+        const [assets, locations] = await Promise.all([store.getAll('assets'), store.getAll('locations')]);
+        const locName = id => { const l = locations.find(x => x.locId === id); return l ? l.locId : (id || ''); };
+        el.innerHTML = `
+        <div class="page-head"><h1>Assets</h1>
+          <div class="actions">
+            <button class="btn" onclick="openImportModal()">⬆️ Import CSV</button>
+            <button class="btn" onclick="exportAssetsCsv()">⬇️ Export</button>
+            <button class="btn primary" onclick="openAssetModal()">＋ New asset</button>
+          </div></div>
+        <div class="toolbar"><input class="search" id="assetSearch" placeholder="🔎 Search assets…"></div>
+        <div class="table-wrap panel"><table id="assetsTable" class="js-colfilter"><thead><tr>
+          <th>Asset tag</th><th>Category</th><th>Make / model</th><th>Serial</th><th>Status</th><th>Assigned to</th><th>Location</th><th>Actions</th>
+        </tr></thead><tbody>
+        ${assets.sort((a, b) => a.assetTag.localeCompare(b.assetTag)).map(a => `<tr>
+          <td class="nowrap"><a href="#/asset/${encodeURIComponent(a.assetTag)}"><strong>${esc(a.assetTag)}</strong></a></td>
+          <td>${esc(a.category)}</td>
+          <td>${esc([a.make, a.model].filter(Boolean).join(' '))}</td>
+          <td class="nowrap">${esc(a.serialNumber)}</td>
+          <td>${statusBadge(a.status)}</td>
+          <td>${esc(a.assignedToName || '—')}</td>
+          <td>${esc(locName(a.locationId) || '—')}</td>
+          <td class="nowrap">
+            ${['Deployed', 'Reserved'].includes(a.status) ? `<button class="btn sm" onclick="checkInAsset('${esc(a.assetTag)}')">Check in</button>` : `<button class="btn sm" onclick="checkOutAsset('${esc(a.assetTag)}')">Check out</button>`}
+            <button class="btn sm" onclick="openAssetModal('${esc(a.assetTag)}')">Edit</button>
+          </td></tr>`).join('')}
+        </tbody></table></div>
+        ${assets.length ? '' : '<div class="empty">No assets yet. Add one or import a CSV.</div>'}`;
+        const table = document.getElementById('assetsTable');
+        enableColumnFilters(table, 'assets');
+        document.getElementById('assetSearch').addEventListener('input', e => { table._searchTerm = e.target.value; applyTableFilters(table); });
+    }
+
+    async function openAssetModal(assetTag) {
+        openModal('<div class="m-body"><div class="empty">Loading…</div></div>');
+        const [assets, locations] = await Promise.all([store.getAll('assets'), store.getAll('locations')]);
+        const a = assetTag ? assets.find(x => x.assetTag === assetTag) : null;
+        const opt = (arr, sel) => arr.map(v => `<option ${v === sel ? 'selected' : ''}>${esc(v)}</option>`).join('');
+        openModal(`
+        <div class="m-head"><h3>${a ? 'Edit asset' : 'New asset'}</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body">
+          <div class="grid3">
+            <div class="field"><label>Asset tag *</label><input id="f_assetTag" value="${esc(a?.assetTag || '')}" ${a ? 'readonly' : ''}></div>
+            <div class="field"><label>Serial number</label><input id="f_serial" value="${esc(a?.serialNumber || '')}"></div>
+            <div class="field"><label>Category</label><select id="f_category"><option value=""></option>${opt(CATEGORIES, a?.category)}</select></div>
+            <div class="field"><label>Make</label><input id="f_make" value="${esc(a?.make || '')}"></div>
+            <div class="field"><label>Model</label><input id="f_model" value="${esc(a?.model || '')}"></div>
+            <div class="field"><label>Status</label><select id="f_status">${opt(STATUSES, a?.status || 'In Stock')}</select></div>
+            <div class="field"><label>Condition</label><select id="f_condition"><option value=""></option>${opt(CONDITIONS, a?.condition)}</select></div>
+            <div class="field"><label>Expected back?</label><select id="f_expect"><option value="">—</option><option ${a?.expectReturn === 'Yes' ? 'selected' : ''}>Yes</option><option ${a?.expectReturn === 'No' ? 'selected' : ''}>No</option></select></div>
+            <div class="field"><label>Location</label><select id="f_location"><option value=""></option>${locations.map(l => `<option ${l.locId === a?.locationId ? 'selected' : ''}>${esc(l.locId)}</option>`).join('')}</select></div>
+          </div>
+          <fieldset class="fs"><legend>Finance</legend><div class="grid3">
+            <div class="field"><label>PO number</label><input id="f_po" value="${esc(a?.poNumber || '')}"></div>
+            <div class="field"><label>Vendor</label><input id="f_vendor" value="${esc(a?.vendor || '')}"></div>
+            <div class="field"><label>Purchase date</label><input type="date" id="f_pdate" value="${toDateInput(a?.purchaseDate)}"></div>
+            <div class="field"><label>Purchase cost ($)</label><input type="number" id="f_cost" value="${esc(a?.purchaseCost || '')}"></div>
+            <div class="field"><label>Depreciation years</label><input type="number" id="f_depyears" value="${esc(a?.depreciationYears || '')}"></div>
+            <div class="field"><label>Salvage value ($)</label><input type="number" id="f_salvage" value="${esc(a?.salvageValue || '')}"></div>
+            <div class="field"><label>Warranty expiration</label><input type="date" id="f_warranty" value="${toDateInput(a?.warrantyExpiration)}"></div>
+          </div></fieldset>
+          <div class="field"><label>Notes</label><textarea id="f_notes">${esc(a?.notes || '')}</textarea></div>
+        </div>
+        <div class="m-foot">
+          ${a ? `<button class="btn danger" onclick="deleteAsset('${esc(a.assetTag)}')">Delete</button>` : ''}
+          <button class="btn" onclick="closeModal()">Cancel</button>
+          <button class="btn primary" onclick="saveAsset('${a ? esc(a._spItemId) : ''}')">Save</button>
+        </div>`, true);
+    }
+
+    async function saveAsset(spItemId) {
+        const g = id => document.getElementById(id).value.trim();
+        const tag = g('f_assetTag');
+        if (!tag) { toast('Asset tag is required.', 'bad'); return; }
+        const obj = {
+            assetTag: tag, serialNumber: g('f_serial'), category: g('f_category'), make: g('f_make'), model: g('f_model'),
+            status: g('f_status'), condition: g('f_condition'), expectReturn: g('f_expect'), locationId: g('f_location'),
+            poNumber: g('f_po'), vendor: g('f_vendor'), purchaseDate: fromDateInput(g('f_pdate')),
+            purchaseCost: g('f_cost') === '' ? '' : Number(g('f_cost')), depreciationYears: g('f_depyears') === '' ? '' : Number(g('f_depyears')),
+            salvageValue: g('f_salvage') === '' ? '' : Number(g('f_salvage')), warrantyExpiration: fromDateInput(g('f_warranty')), notes: g('f_notes')
+        };
+        try {
+            if (spItemId) await store.update('assets', spItemId, obj);
+            else {
+                const existing = (await store.getAll('assets')).find(x => x.assetTag === tag);
+                if (existing) { toast('An asset with that tag already exists.', 'bad'); return; }
+                await store.add('assets', obj);
+            }
+            toast('Asset saved.', 'ok'); closeModal(); router();
+        } catch (e) { toast('Save failed: ' + e.message, 'bad'); }
+    }
+
+    async function deleteAsset(assetTag) {
+        if (!confirm(`Delete asset ${assetTag}? This cannot be undone.`)) return;
+        const a = (await store.getAll('assets')).find(x => x.assetTag === assetTag);
+        if (!a) return;
+        try { await store.remove('assets', a._spItemId); toast('Asset deleted.', 'ok'); closeModal(); go('#/assets'); router(); }
+        catch (e) { toast('Delete failed: ' + e.message, 'bad'); }
+    }
+
+    async function viewAssetDetails(el, assetTag) {
+        const [assets, assignments, disposals, locations] = await Promise.all([
+            store.getAll('assets'), store.getAll('assignments'), store.getAll('disposals'), store.getAll('locations')]);
+        const a = assets.find(x => x.assetTag === assetTag);
+        if (!a) { el.innerHTML = `<div class="empty">Asset “${esc(assetTag)}” not found. <a href="#/assets">Back</a></div>`; return; }
+        const hist = assignments.filter(x => x.assetTag === assetTag).sort((p, q) => new Date(q.issuedDate) - new Date(p.issuedDate));
+        const disp = disposals.filter(x => x.assetTag === assetTag);
+        const bv = bookValue(a);
+        const row = (k, v) => `<tr><td class="muted nowrap">${k}</td><td>${v || '—'}</td></tr>`;
+        el.innerHTML = `
+        <div class="page-head"><h1>${esc(a.assetTag)} ${statusBadge(a.status)}</h1>
+          <div class="actions">
+            <button class="btn" onclick="printAssetQr('${esc(a.assetTag)}')">🏷️ QR label</button>
+            ${['Deployed', 'Reserved'].includes(a.status) ? `<button class="btn" onclick="checkInAsset('${esc(a.assetTag)}')">Check in</button>` : `<button class="btn" onclick="checkOutAsset('${esc(a.assetTag)}')">Check out</button>`}
+            ${!['Retired', 'Disposed'].includes(a.status) ? `<button class="btn" onclick="openRetireModal('${esc(a.assetTag)}')">Retire / dispose</button>` : ''}
+            <button class="btn primary" onclick="openAssetModal('${esc(a.assetTag)}')">Edit</button>
+          </div></div>
+        <a href="#/assets" class="muted">← All assets</a>
+        <div class="grid2" style="margin-top:12px">
+          <div class="panel"><h2>Details</h2><div class="body"><table>
+            ${row('Category', esc(a.category))}${row('Make / model', esc([a.make, a.model].filter(Boolean).join(' ')))}
+            ${row('Serial', esc(a.serialNumber))}${row('Condition', esc(a.condition))}
+            ${row('Expected back', esc(a.expectReturn))}${row('Location', esc(a.locationId))}
+            ${row('Assigned to', a.assignedToName ? esc(a.assignedToName) + (a.assignedToUpn ? ` <span class="muted">(${esc(a.assignedToUpn)})</span>` : '') : '')}
+            ${row('Assigned date', fmtDate(a.assignedDate))}${row('Notes', esc(a.notes))}
+          </table></div></div>
+          <div class="panel"><h2>Finance</h2><div class="body"><table>
+            ${row('PO number', esc(a.poNumber))}${row('Vendor', esc(a.vendor))}
+            ${row('Purchased', fmtDate(a.purchaseDate))}${row('Purchase cost', money(a.purchaseCost))}
+            ${row('Depreciation', a.depreciationYears ? esc(a.depreciationYears) + ' yr straight-line' : '')}
+            ${row('Salvage value', money(a.salvageValue))}
+            ${row('Current book value', bv != null ? `<strong>${money(bv)}</strong>` : '')}
+            ${row('Warranty expires', fmtDate(a.warrantyExpiration))}
+          </table></div></div>
+        </div>
+        <div class="panel"><h2>🔄 Custody history</h2><div class="body">${hist.length ? `<div class="table-wrap"><table><thead><tr><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th></tr></thead><tbody>${hist.map(x => `<tr><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td>${fmtDate(x.issuedDate)}</td><td>${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No custody records yet.</div>'}</div></div>
+        ${disp.length ? `<div class="panel"><h2>🗑️ Disposal / data-wipe</h2><div class="body"><div class="table-wrap"><table><thead><tr><th>Retired</th><th>Method</th><th>Data wipe</th><th>Wipe method</th><th>Cert</th><th>By</th></tr></thead><tbody>${disp.map(d => `<tr><td>${fmtDate(d.retiredDate)}</td><td>${esc(d.disposalMethod)}</td><td>${esc(d.dataWipeStatus)}</td><td>${esc(d.dataWipeMethod)}</td><td>${esc(d.certRef)}</td><td>${esc(d.disposedBy)}</td></tr>`).join('')}</tbody></table></div></div></div>` : ''}`;
+    }
+
+    /* --------------------------------------------------------- check out / in */
+    let _pickedPerson = null;
+    function personPickerHtml() {
+        return `<div class="field"><label>Person (search the directory)</label>
+          <input id="pp_search" placeholder="Type a name or email…" autocomplete="off">
+          <div class="people-results" id="pp_results" style="display:none"></div>
+          <div id="pp_picked" class="muted" style="margin-top:6px"></div></div>`;
+    }
+    function wirePeoplePicker() {
+        _pickedPerson = null;
+        const inp = document.getElementById('pp_search'), box = document.getElementById('pp_results');
+        let timer = null;
+        inp.addEventListener('input', () => {
+            clearTimeout(timer);
+            const q = inp.value.trim();
+            timer = setTimeout(async () => {
+                if (q.length < 2) { box.style.display = 'none'; return; }
+                try {
+                    const people = await searchDirectoryPeople(q);
+                    box.innerHTML = people.length ? people.map(p => `<div class="p" onclick='pickPerson(${JSON.stringify({ id: p.id, name: p.displayName, upn: p.userPrincipalName || p.mail || '' }).replace(/'/g, "&#39;")})'><strong>${esc(p.displayName)}</strong><small>${esc(p.userPrincipalName || p.mail || '')}${p.jobTitle ? ' · ' + esc(p.jobTitle) : ''}</small></div>`).join('') : '<div class="p muted">No matches. You can also type a free-text name below.</div>';
+                    box.style.display = 'block';
+                } catch (e) { box.innerHTML = `<div class="p muted">Directory search unavailable (${esc(e.message)}). Use free-text name below.</div>`; box.style.display = 'block'; }
+            }, 300);
+        });
+    }
+    function pickPerson(p) {
+        _pickedPerson = p;
+        document.getElementById('pp_picked').innerHTML = `Selected: <strong>${esc(p.name)}</strong> <span class="muted">${esc(p.upn)}</span>`;
+        document.getElementById('pp_results').style.display = 'none';
+        document.getElementById('pp_search').value = p.name;
+    }
+
+    async function checkOutAsset(assetTag) {
+        openModal('<div class="m-body"><div class="empty">Loading…</div></div>');
+        const a = (await store.getAll('assets')).find(x => x.assetTag === assetTag);
+        if (!a) return;
+        openModal(`
+        <div class="m-head"><h3>Check out ${esc(assetTag)}</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body">
+          ${personPickerHtml()}
+          <div class="field"><label>…or free-text name (contractors / non-directory)</label><input id="co_freename"></div>
+          <div class="grid2">
+            <div class="field"><label>Issue date</label><input type="date" id="co_date" value="${toDateInput(new Date().toISOString())}"></div>
+            <div class="field"><label>Condition out</label><select id="co_cond"><option value=""></option>${CONDITIONS.map(c => `<option ${c === a.condition ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+          </div>
+          <div class="field"><label>Notes</label><textarea id="co_notes"></textarea></div>
+        </div>
+        <div class="m-foot"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="confirmCheckOut('${esc(assetTag)}','${esc(a._spItemId)}')">Check out</button></div>`, true);
+        wirePeoplePicker();
+    }
+    async function confirmCheckOut(assetTag, spItemId) {
+        const free = document.getElementById('co_freename').value.trim();
+        const name = _pickedPerson?.name || free;
+        if (!name) { toast('Pick a person or enter a name.', 'bad'); return; }
+        const date = fromDateInput(document.getElementById('co_date').value) || new Date().toISOString();
+        const cond = document.getElementById('co_cond').value;
+        const notes = document.getElementById('co_notes').value.trim();
+        try {
+            await store.add('assignments', { key: `${assetTag} | ${date.slice(0, 10)}`, assetTag, personName: name, personUpn: _pickedPerson?.upn || '', personAadId: _pickedPerson?.id || '', issuedDate: date, conditionOut: cond, issuedBy: currentUser?.name || currentUser?.username || '', notes });
+            await store.update('assets', spItemId, { status: 'Deployed', assignedToName: name, assignedToUpn: _pickedPerson?.upn || '', assignedToAadId: _pickedPerson?.id || '', assignedDate: date });
+            toast(`Checked out to ${name}.`, 'ok'); closeModal(); router();
+        } catch (e) { toast('Check-out failed: ' + e.message, 'bad'); }
+    }
+
+    async function checkInAsset(assetTag) {
+        openModal('<div class="m-body"><div class="empty">Loading…</div></div>');
+        const [assets, assignments] = await Promise.all([store.getAll('assets'), store.getAll('assignments')]);
+        const a = assets.find(x => x.assetTag === assetTag);
+        if (!a) return;
+        const open = assignments.filter(x => x.assetTag === assetTag && !x.returnedDate).sort((p, q) => new Date(q.issuedDate) - new Date(p.issuedDate))[0];
+        openModal(`
+        <div class="m-head"><h3>Check in ${esc(assetTag)}</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body">
+          <p class="muted">Currently with <strong>${esc(a.assignedToName || open?.personName || 'unknown')}</strong>. Returning it to stock.</p>
+          <div class="grid2">
+            <div class="field"><label>Return date</label><input type="date" id="ci_date" value="${toDateInput(new Date().toISOString())}"></div>
+            <div class="field"><label>New status</label><select id="ci_status"><option>In Stock</option><option>Spare</option><option>In Repair</option><option>Retired</option></select></div>
+            <div class="field"><label>Condition in</label><select id="ci_cond"><option value=""></option>${CONDITIONS.map(c => `<option>${c}</option>`).join('')}</select></div>
+            <div class="field"><label>New location</label><input id="ci_loc" value="${esc(a.locationId || '')}"></div>
+          </div>
+          <div class="field"><label>Notes</label><textarea id="ci_notes"></textarea></div>
+        </div>
+        <div class="m-foot"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="confirmCheckIn('${esc(assetTag)}','${esc(a._spItemId)}','${esc(open?._spItemId || '')}')">Check in</button></div>`, true);
+    }
+    async function confirmCheckIn(assetTag, assetItemId, assignItemId) {
+        const date = fromDateInput(document.getElementById('ci_date').value) || new Date().toISOString();
+        const status = document.getElementById('ci_status').value;
+        const cond = document.getElementById('ci_cond').value;
+        const loc = document.getElementById('ci_loc').value.trim();
+        const notes = document.getElementById('ci_notes').value.trim();
+        try {
+            if (assignItemId) await store.update('assignments', assignItemId, { returnedDate: date, conditionIn: cond, notes });
+            await store.update('assets', assetItemId, { status, assignedToName: '', assignedToUpn: '', assignedToAadId: '', assignedDate: '', condition: cond || undefined, locationId: loc || undefined });
+            toast('Checked in.', 'ok'); closeModal(); router();
+        } catch (e) { toast('Check-in failed: ' + e.message, 'bad'); }
+    }
+
+    /* --------------------------------------------------------- retire / dispose */
+    async function openRetireModal(assetTag) {
+        openModal('<div class="m-body"><div class="empty">Loading…</div></div>');
+        const a = (await store.getAll('assets')).find(x => x.assetTag === assetTag);
+        if (!a) return;
+        openModal(`
+        <div class="m-head"><h3>Retire / dispose ${esc(assetTag)}</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body">
+          <div class="grid2">
+            <div class="field"><label>Retired date</label><input type="date" id="rt_date" value="${toDateInput(new Date().toISOString())}"></div>
+            <div class="field"><label>Set status</label><select id="rt_status"><option>Retired</option><option>Disposed</option><option>Lost</option></select></div>
+            <div class="field"><label>Disposal method</label><select id="rt_method"><option value=""></option>${DISPOSAL_METHODS.map(m => `<option>${m}</option>`).join('')}</select></div>
+            <div class="field"><label>Data wipe status</label><select id="rt_wipe"><option value=""></option>${WIPE_STATUSES.map(w => `<option>${w}</option>`).join('')}</select></div>
+            <div class="field"><label>Data wipe method</label><input id="rt_wipemethod" placeholder="e.g. NIST 800-88 purge"></div>
+            <div class="field"><label>Certificate ref / link</label><input id="rt_cert"></div>
+          </div>
+          <div class="field"><label>Notes</label><textarea id="rt_notes"></textarea></div>
+        </div>
+        <div class="m-foot"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="confirmRetire('${esc(assetTag)}','${esc(a._spItemId)}','${esc(a.serialNumber || '')}')">Save disposal</button></div>`, true);
+    }
+    async function confirmRetire(assetTag, assetItemId, serial) {
+        const date = fromDateInput(document.getElementById('rt_date').value) || new Date().toISOString();
+        const status = document.getElementById('rt_status').value;
+        const method = document.getElementById('rt_method').value;
+        const wipe = document.getElementById('rt_wipe').value;
+        const wipeMethod = document.getElementById('rt_wipemethod').value.trim();
+        const cert = document.getElementById('rt_cert').value.trim();
+        const notes = document.getElementById('rt_notes').value.trim();
+        try {
+            await store.add('disposals', { key: `${assetTag} | ${date.slice(0, 10)}`, assetTag, serialNumber: serial, retiredDate: date, disposalMethod: method, dataWipeStatus: wipe, dataWipeMethod: wipeMethod, certRef: cert, disposedBy: currentUser?.name || currentUser?.username || '', notes });
+            await store.update('assets', assetItemId, { status, retiredDate: date, disposalMethod: method, dataWipeStatus: wipe, assignedToName: '', assignedToUpn: '', assignedToAadId: '' });
+            toast('Disposal recorded.', 'ok'); closeModal(); router();
+        } catch (e) { toast('Save failed: ' + e.message, 'bad'); }
+    }
+
+    /* --------------------------------------------------------------- Assignments */
+    async function renderAssignmentsPage(el) {
+        const assignments = await store.getAll('assignments');
+        const sorted = assignments.sort((p, q) => new Date(q.issuedDate) - new Date(p.issuedDate));
+        el.innerHTML = `
+        <div class="page-head"><h1>Assignments</h1><div class="muted">${assignments.length} custody records · ${assignments.filter(x => !x.returnedDate).length} currently out</div></div>
+        <div class="toolbar"><input class="search" id="asgSearch" placeholder="🔎 Search…"></div>
+        <div class="table-wrap panel"><table id="asgTable"><thead><tr><th>Asset</th><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th></tr></thead><tbody>
+        ${sorted.map(x => `<tr><td class="nowrap"><a href="#/asset/${encodeURIComponent(x.assetTag)}">${esc(x.assetTag)}</a></td><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td class="nowrap">${fmtDate(x.issuedDate)}</td><td class="nowrap">${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td></tr>`).join('')}
+        </tbody></table></div>
+        ${assignments.length ? '' : '<div class="empty">No assignments yet. Check out an asset to create custody history.</div>'}`;
+        const table = document.getElementById('asgTable'); enableColumnFilters(table, 'assignments');
+        document.getElementById('asgSearch').addEventListener('input', e => { table._searchTerm = e.target.value; applyTableFilters(table); });
+    }
+
+    /* -------------------------------------------------------------------- Spares */
+    function computeSpareGaps(assets, spares) {
+        // on-hand = assets in stock/spare, counted by category (and model when the target names one)
+        return spares.map(t => {
+            const min = Number(t.minQty) || 0, target = Number(t.targetQty) || 0;
+            const onHand = assets.filter(a => ['In Stock', 'Spare'].includes(a.status) && a.category === t.category && (!t.model || a.model === t.model)).length;
+            return { category: t.category, model: t.model, min, target, onHand, gap: Math.max(0, min - onHand), _spItemId: t._spItemId };
+        });
+    }
+    async function renderSparesPage(el) {
+        const [assets, spares] = await Promise.all([store.getAll('assets'), store.getAll('sparing')]);
+        const gaps = computeSpareGaps(assets, spares);
+        el.innerHTML = `
+        <div class="page-head"><h1>Spares</h1><div class="actions"><button class="btn primary" onclick="openSpareModal()">＋ New target</button></div></div>
+        <p class="muted">On-hand counts assets in <em>In Stock</em> or <em>Spare</em> status matching the category (and model, if the target names one).</p>
+        <div class="table-wrap panel"><table><thead><tr><th>Category</th><th>Model</th><th class="right">On hand</th><th class="right">Min</th><th class="right">Target</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+        ${gaps.map(g => `<tr><td>${esc(g.category)}</td><td>${esc(g.model || '—')}</td><td class="right">${g.onHand}</td><td class="right">${g.min}</td><td class="right">${g.target}</td><td>${g.gap > 0 ? `<span class="badge b-bad">Order ${g.gap}</span>` : (g.onHand < g.target ? '<span class="badge b-warn">Below target</span>' : '<span class="badge b-ok">OK</span>')}</td><td><button class="btn sm" onclick="openSpareModal('${esc(g._spItemId)}')">Edit</button></td></tr>`).join('')}
+        </tbody></table></div>
+        ${spares.length ? '' : '<div class="empty">No sparing targets yet. Add one to track reorder levels.</div>'}`;
+    }
+    async function openSpareModal(spItemId) {
+        const spares = await store.getAll('sparing');
+        const t = spItemId ? spares.find(x => x._spItemId === spItemId) : null;
+        openModal(`
+        <div class="m-head"><h3>${t ? 'Edit' : 'New'} sparing target</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body"><div class="grid2">
+          <div class="field"><label>Category *</label><select id="sp_cat"><option value=""></option>${CATEGORIES.map(c => `<option ${c === t?.category ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+          <div class="field"><label>Model (blank = whole category)</label><input id="sp_model" value="${esc(t?.model || '')}"></div>
+          <div class="field"><label>Min qty</label><input type="number" id="sp_min" value="${esc(t?.minQty || '')}"></div>
+          <div class="field"><label>Target qty</label><input type="number" id="sp_target" value="${esc(t?.targetQty || '')}"></div>
+        </div><div class="field"><label>Notes</label><textarea id="sp_notes">${esc(t?.notes || '')}</textarea></div></div>
+        <div class="m-foot">${t ? `<button class="btn danger" onclick="deleteSpare('${esc(t._spItemId)}')">Delete</button>` : ''}<button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="saveSpare('${t ? esc(t._spItemId) : ''}')">Save</button></div>`);
+    }
+    async function saveSpare(spItemId) {
+        const cat = document.getElementById('sp_cat').value, model = document.getElementById('sp_model').value.trim();
+        if (!cat) { toast('Category is required.', 'bad'); return; }
+        const obj = { key: model ? `${cat}|${model}` : cat, category: cat, model, minQty: Number(document.getElementById('sp_min').value) || 0, targetQty: Number(document.getElementById('sp_target').value) || 0, notes: document.getElementById('sp_notes').value.trim() };
+        try { if (spItemId) await store.update('sparing', spItemId, obj); else await store.add('sparing', obj); toast('Saved.', 'ok'); closeModal(); router(); }
+        catch (e) { toast('Save failed: ' + e.message, 'bad'); }
+    }
+    async function deleteSpare(spItemId) { if (!confirm('Delete this target?')) return; try { await store.remove('sparing', spItemId); toast('Deleted.', 'ok'); closeModal(); router(); } catch (e) { toast('Delete failed: ' + e.message, 'bad'); } }
+
+    /* ----------------------------------------------------------------- Locations */
+    async function renderLocationsPage(el) {
+        const locations = await store.getAll('locations');
+        const assets = await store.getAll('assets');
+        el.innerHTML = `
+        <div class="page-head"><h1>Locations</h1><div class="actions"><button class="btn primary" onclick="openLocationModal()">＋ New location</button></div></div>
+        <div class="table-wrap panel"><table><thead><tr><th>Location</th><th>Type</th><th>Address</th><th class="right">Assets</th><th>Actions</th></tr></thead><tbody>
+        ${locations.map(l => `<tr><td><strong>${esc(l.locId)}</strong></td><td>${esc(l.locType)}</td><td>${esc(l.address)}</td><td class="right">${assets.filter(a => a.locationId === l.locId).length}</td><td><button class="btn sm" onclick="openLocationModal('${esc(l._spItemId)}')">Edit</button></td></tr>`).join('')}
+        </tbody></table></div>
+        ${locations.length ? '' : '<div class="empty">No locations yet.</div>'}`;
+    }
+    async function openLocationModal(spItemId) {
+        const locations = await store.getAll('locations');
+        const l = spItemId ? locations.find(x => x._spItemId === spItemId) : null;
+        openModal(`
+        <div class="m-head"><h3>${l ? 'Edit' : 'New'} location</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body">
+          <div class="field"><label>Location name / id *</label><input id="lo_id" value="${esc(l?.locId || '')}" ${l ? 'readonly' : ''}></div>
+          <div class="field"><label>Type</label><select id="lo_type"><option value=""></option>${LOC_TYPES.map(t => `<option ${t === l?.locType ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+          <div class="field"><label>Address</label><textarea id="lo_addr">${esc(l?.address || '')}</textarea></div>
+          <div class="field"><label>Notes</label><textarea id="lo_notes">${esc(l?.notes || '')}</textarea></div>
+        </div>
+        <div class="m-foot">${l ? `<button class="btn danger" onclick="deleteLocation('${esc(l._spItemId)}')">Delete</button>` : ''}<button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="saveLocation('${l ? esc(l._spItemId) : ''}')">Save</button></div>`);
+    }
+    async function saveLocation(spItemId) {
+        const id = document.getElementById('lo_id').value.trim();
+        if (!id) { toast('Name is required.', 'bad'); return; }
+        const obj = { locId: id, locType: document.getElementById('lo_type').value, address: document.getElementById('lo_addr').value.trim(), notes: document.getElementById('lo_notes').value.trim() };
+        try { if (spItemId) await store.update('locations', spItemId, obj); else await store.add('locations', obj); toast('Saved.', 'ok'); closeModal(); router(); }
+        catch (e) { toast('Save failed: ' + e.message, 'bad'); }
+    }
+    async function deleteLocation(spItemId) { if (!confirm('Delete this location?')) return; try { await store.remove('locations', spItemId); toast('Deleted.', 'ok'); closeModal(); router(); } catch (e) { toast('Delete failed: ' + e.message, 'bad'); } }
+
+    /* -------------------------------------------------------------------- Health */
+    async function renderHealthPage(el) {
+        const [assets, assignments, locations] = await Promise.all([store.getAll('assets'), store.getAll('assignments'), store.getAll('locations')]);
+        // duplicates
+        const bySerial = {}, byTag = {};
+        assets.forEach(a => { if (a.serialNumber) (bySerial[a.serialNumber] = bySerial[a.serialNumber] || []).push(a); (byTag[a.assetTag] = byTag[a.assetTag] || []).push(a); });
+        const dupSerial = Object.entries(bySerial).filter(([, v]) => v.length > 1);
+        const dupTag = Object.entries(byTag).filter(([, v]) => v.length > 1);
+        // orphans: assignment or asset location referencing something missing
+        const tagSet = new Set(assets.map(a => a.assetTag));
+        const orphanAssign = assignments.filter(x => x.assetTag && !tagSet.has(x.assetTag));
+        const locSet = new Set(locations.map(l => l.locId));
+        const badLoc = assets.filter(a => a.locationId && !locSet.has(a.locationId));
+        // completeness
+        const deployedNoOwner = assets.filter(a => a.status === 'Deployed' && !a.assignedToName);
+        const noSerial = assets.filter(a => !a.serialNumber && !['Peripheral', 'Other'].includes(a.category));
+        const noCost = assets.filter(a => !a.purchaseCost && !['Retired', 'Disposed', 'Lost'].includes(a.status));
+        // stale-out: deployed with no open assignment
+        const openByTag = new Set(assignments.filter(x => !x.returnedDate).map(x => x.assetTag));
+        const deployedNoOpen = assets.filter(a => a.status === 'Deployed' && !openByTag.has(a.assetTag));
+
+        const section = (title, kind, items, render) => `<div class="panel"><h2>${title} <span class="badge ${items.length ? kind : 'b-ok'}">${items.length}</span></h2><div class="body">${items.length ? render() : '<div class="empty">None. ✓</div>'}</div></div>`;
+        const link = t => `<a href="#/asset/${encodeURIComponent(t)}">${esc(t)}</a>`;
+        el.innerHTML = `
+        <div class="page-head"><h1>Inventory Health</h1><button class="btn" onclick="store.clear();router()">↻ Re-check</button></div>
+        <h3 class="muted">Integrity</h3>
+        ${section('Duplicate serial numbers', 'b-bad', dupSerial, () => dupSerial.map(([s, v]) => `<div>Serial <strong>${esc(s)}</strong>: ${v.map(a => link(a.assetTag)).join(', ')}</div>`).join(''))}
+        ${section('Duplicate asset tags', 'b-bad', dupTag, () => dupTag.map(([t, v]) => `<div>Tag <strong>${esc(t)}</strong> appears ${v.length}×</div>`).join(''))}
+        ${section('Assignments for missing assets', 'b-bad', orphanAssign, () => orphanAssign.map(x => `<div>${esc(x.assetTag)} → ${esc(x.personName)} (asset not found)</div>`).join(''))}
+        ${section('Assets in an unknown location', 'b-warn', badLoc, () => badLoc.map(a => `<div>${link(a.assetTag)} → location “${esc(a.locationId)}” not in Locations</div>`).join(''))}
+        ${section('Deployed but no open custody record', 'b-warn', deployedNoOpen, () => deployedNoOpen.map(a => `<div>${link(a.assetTag)} — status Deployed, no open assignment</div>`).join(''))}
+        <h3 class="muted">Completeness</h3>
+        ${section('Deployed with no assignee', 'b-warn', deployedNoOwner, () => deployedNoOwner.map(a => `<div>${link(a.assetTag)}</div>`).join(''))}
+        ${section('Missing serial number', 'b-warn', noSerial, () => noSerial.map(a => `<div>${link(a.assetTag)} (${esc(a.category)})</div>`).join(''))}
+        ${section('Missing purchase cost', 'b-mut', noCost, () => noCost.map(a => `<div>${link(a.assetTag)}</div>`).join(''))}`;
+    }
+
+    /* ------------------------------------------------------------------ Activity */
+    async function renderActivityPage(el) {
+        const entities = ['assets', 'assignments', 'sparing', 'locations', 'disposals'];
+        const all = await Promise.all(entities.map(e => store.getAll(e)));
+        const rows = [];
+        entities.forEach((e, i) => all[i].forEach(o => {
+            const label = o.assetTag || o.locId || o.key || o._spItemId;
+            rows.push({ entity: e, label, who: o._modifiedBy, when: o._modified, created: o._created });
+        }));
+        rows.sort((a, b) => new Date(b.when) - new Date(a.when));
+        el.innerHTML = `
+        <div class="page-head"><h1>Activity</h1><div class="muted">Most recent changes across all lists</div></div>
+        <div class="toolbar"><input class="search" id="actSearch" placeholder="🔎 Search…"></div>
+        <div class="table-wrap panel"><table id="actTable"><thead><tr><th>When</th><th>Type</th><th>Record</th><th>By</th><th>New?</th></tr></thead><tbody>
+        ${rows.slice(0, 500).map(r => { const isNew = r.created && r.when && Math.abs(new Date(r.when) - new Date(r.created)) < 60000; return `<tr><td class="nowrap">${fmtDate(r.when)}</td><td>${esc(r.entity)}</td><td>${r.entity === 'assets' ? `<a href="#/asset/${encodeURIComponent(r.label)}">${esc(r.label)}</a>` : esc(r.label)}</td><td>${esc(r.who)}</td><td>${isNew ? '<span class="badge b-info">new</span>' : '<span class="muted">edit</span>'}</td></tr>`; }).join('')}
+        </tbody></table></div>`;
+        const table = document.getElementById('actTable');
+        document.getElementById('actSearch').addEventListener('input', e => { table._searchTerm = e.target.value; [...table.tBodies[0].rows].forEach(r => { r.style.display = r.textContent.toLowerCase().includes(e.target.value.toLowerCase()) ? '' : 'none'; }); });
+    }
+
+    /* ------------------------------------------------------------------- QR label */
+    function loadQrLib() {
+        if (window.QRCode) return Promise.resolve();
+        return new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js'; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+    }
+    async function printAssetQr(assetTag) {
+        await loadQrLib();
+        const url = CONFIG.pagesUrl + '#/asset/' + encodeURIComponent(assetTag);
+        const holder = document.createElement('div');
+        new QRCode(holder, { text: url, width: 300, height: 300, correctLevel: QRCode.CorrectLevel.M });
+        setTimeout(() => {
+            const img = holder.querySelector('img') || holder.querySelector('canvas');
+            const src = img.tagName === 'IMG' ? img.src : img.toDataURL();
+            const w = window.open('', '_blank', 'width=420,height=520');
+            w.document.write(`<html><head><title>${esc(assetTag)}</title><style>body{font-family:sans-serif;text-align:center;padding:24px}h2{margin:8px 0}</style></head><body><img src="${src}" style="width:280px;height:280px"><h2>${esc(assetTag)}</h2><div>Scan to open this asset</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+            w.document.close();
+        }, 250);
+    }
+
+    /* --------------------------------------------------------------- CSV import/export */
+    function openImportModal() {
+        openModal(`
+        <div class="m-head"><h3>Import assets (CSV / Excel)</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body">
+          <p class="muted">Header row should include <strong>AssetTag</strong> (required). Recognized columns: AssetTag, SerialNumber, Category, Make, Model, Status, Condition, ExpectReturn, LocationId, PONumber, Vendor, PurchaseDate, PurchaseCost, DepreciationYears, SalvageValue, WarrantyExpiration, Notes. Existing tags are skipped (no overwrite).</p>
+          <input type="file" id="imp_file" accept=".csv,.xlsx,.xls">
+          <div id="imp_preview" style="margin-top:12px"></div>
+        </div>
+        <div class="m-foot"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" id="imp_go" disabled onclick="runImport()">Import</button></div>`, true);
+        document.getElementById('imp_file').addEventListener('change', previewImport);
+    }
+    let _importRows = [];
+    function previewImport(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+            try {
+                const wb = XLSX.read(ev.target.result, { type: 'binary' });
+                const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+                const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+                const cols = { assettag: 'assetTag', serialnumber: 'serialNumber', serial: 'serialNumber', category: 'category', make: 'make', model: 'model', status: 'status', condition: 'condition', expectreturn: 'expectReturn', locationid: 'locationId', location: 'locationId', ponumber: 'poNumber', po: 'poNumber', vendor: 'vendor', purchasedate: 'purchaseDate', purchasecost: 'purchaseCost', cost: 'purchaseCost', depreciationyears: 'depreciationYears', salvagevalue: 'salvageValue', warrantyexpiration: 'warrantyExpiration', warranty: 'warrantyExpiration', notes: 'notes' };
+                _importRows = rows.map(r => { const o = {}; Object.entries(r).forEach(([k, v]) => { const f = cols[norm(k)]; if (f) o[f] = v; }); return o; }).filter(o => o.assetTag);
+                document.getElementById('imp_preview').innerHTML = `<strong>${_importRows.length}</strong> rows with an AssetTag detected.` + (_importRows.length ? ` First: ${esc(_importRows[0].assetTag)}` : '');
+                document.getElementById('imp_go').disabled = !_importRows.length;
+            } catch (err) { document.getElementById('imp_preview').innerHTML = `<span style="color:#b91c1c">Parse error: ${esc(err.message)}</span>`; }
+        };
+        reader.readAsBinaryString(file);
+    }
+    async function runImport() {
+        const existing = new Set((await store.getAll('assets')).map(a => a.assetTag));
+        let added = 0, skipped = 0, failed = 0;
+        document.getElementById('imp_go').disabled = true;
+        for (const r of _importRows) {
+            if (existing.has(String(r.assetTag))) { skipped++; continue; }
+            const obj = { assetTag: String(r.assetTag), serialNumber: r.serialNumber || '', category: r.category || '', make: r.make || '', model: r.model || '', status: r.status || 'In Stock', condition: r.condition || '', expectReturn: r.expectReturn || '', locationId: r.locationId || '', poNumber: r.poNumber || '', vendor: r.vendor || '', purchaseDate: r.purchaseDate ? fromDateInput(toDateInput(r.purchaseDate)) : '', purchaseCost: r.purchaseCost === '' ? '' : Number(r.purchaseCost), depreciationYears: r.depreciationYears === '' ? '' : Number(r.depreciationYears), salvageValue: r.salvageValue === '' ? '' : Number(r.salvageValue), warrantyExpiration: r.warrantyExpiration ? fromDateInput(toDateInput(r.warrantyExpiration)) : '', notes: r.notes || '' };
+            try { await store.add('assets', obj); added++; existing.add(obj.assetTag); } catch (e) { failed++; }
+            document.getElementById('imp_preview').innerHTML = `Importing… ${added} added, ${skipped} skipped${failed ? ', ' + failed + ' failed' : ''}`;
+        }
+        toast(`Import done: ${added} added, ${skipped} skipped${failed ? ', ' + failed + ' failed' : ''}.`, failed ? 'bad' : 'ok');
+        closeModal(); go('#/assets'); router();
+    }
+    async function exportAssetsCsv() {
+        const assets = await store.getAll('assets');
+        const cols = ['assetTag', 'serialNumber', 'category', 'make', 'model', 'status', 'condition', 'expectReturn', 'assignedToName', 'assignedToUpn', 'locationId', 'poNumber', 'vendor', 'purchaseDate', 'purchaseCost', 'depreciationYears', 'salvageValue', 'warrantyExpiration', 'notes'];
+        const data = assets.map(a => { const o = {}; cols.forEach(c => o[c] = a[c]); return o; });
+        const ws = XLSX.utils.json_to_sheet(data, { header: cols });
+        const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Assets');
+        XLSX.writeFile(wb, 'it-assets-export.csv');
+    }
+    </script>
+</body>
+</html>
