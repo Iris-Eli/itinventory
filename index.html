@@ -152,7 +152,9 @@
             assignments: 'ITAssets_Assignments',
             sparing: 'ITAssets_SparingTargets',
             locations: 'ITAssets_Locations',
-            disposals: 'ITAssets_Disposals'
+            disposals: 'ITAssets_Disposals',
+            licenses: 'ITAssets_Licenses',
+            licenseAssignments: 'ITAssets_LicenseAssignments'
         },
         fieldMappings: {
             assets: {
@@ -175,11 +177,21 @@
                 key: 'Title', assetTag: 'AssetTag', serialNumber: 'SerialNumber', retiredDate: 'RetiredDate',
                 disposalMethod: 'DisposalMethod', dataWipeStatus: 'DataWipeStatus', dataWipeMethod: 'DataWipeMethod',
                 certRef: 'CertRef', disposedBy: 'DisposedBy', notes: 'Notes'
+            },
+            licenses: {
+                product: 'Title', vendor: 'Vendor', licenseType: 'LicenseType', skuPartNumber: 'SkuPartNumber',
+                skuId: 'SkuId', totalSeats: 'TotalSeats', assignedSeats: 'AssignedSeats', unitCost: 'UnitCost',
+                billingCycle: 'BillingCycle', renewalDate: 'RenewalDate', owner: 'Owner', notes: 'Notes'
+            },
+            licenseAssignments: {
+                key: 'Title', product: 'ProductName', skuPartNumber: 'SkuPartNumber', personName: 'PersonName',
+                personUpn: 'PersonUPN', personAadId: 'PersonAADId', assignedDate: 'AssignedDate'
             }
         },
         // Numeric/date columns: '' must become null on write (Graph rejects '' for these types).
         nonTextCols: new Set(['PurchaseCost','SalvageValue','DepreciationYears','MinQty','TargetQty',
-            'AssignedDate','PurchaseDate','WarrantyExpiration','RetiredDate','IssuedDate','ReturnedDate']),
+            'AssignedDate','PurchaseDate','WarrantyExpiration','RetiredDate','IssuedDate','ReturnedDate',
+            'TotalSeats','AssignedSeats','UnitCost','RenewalDate']),
         cacheTimeout: 5 * 60 * 1000
     };
 
@@ -189,6 +201,8 @@
     const LOC_TYPES = ['Office','Storage','Home','Warehouse','Vendor'];
     const DISPOSAL_METHODS = ['Recycle','Return','Destroy','Donate','Sell'];
     const WIPE_STATUSES = ['Wiped','Destroyed','N/A'];
+    const LICENSE_TYPES = ['Subscription','Perpetual'];
+    const BILLING_CYCLES = ['Monthly','Annual','One-time'];
 
     /* ------------------------------------------------------------------ MSAL */
     const msalConfig = {
@@ -276,10 +290,19 @@
             await resolveSiteId();
             let endpoint = `/sites/${CONFIG.siteId}/lists/${this._list(entity)}/items?expand=fields&$top=5000`;
             const rows = [];
-            while (endpoint) {
-                const data = await graphFetch(endpoint);
-                (data.value || []).forEach(it => rows.push(this.mapFromSharePoint(entity, it)));
-                endpoint = data['@odata.nextLink'] ? data['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null;
+            try {
+                while (endpoint) {
+                    const data = await graphFetch(endpoint);
+                    (data.value || []).forEach(it => rows.push(this.mapFromSharePoint(entity, it)));
+                    endpoint = data['@odata.nextLink'] ? data['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null;
+                }
+            } catch (e) {
+                // A not-yet-provisioned list (404) should read as empty, not break the whole page.
+                if (/\b404\b|itemNotFound|does not exist|Not Found/i.test(e.message)) {
+                    console.warn(`List "${this._list(entity)}" not found — treating as empty. Run sp-create-itinventory.ps1 to add it.`);
+                    return [];
+                }
+                throw e;
             }
             this.cache[entity] = rows; this.cacheAt[entity] = Date.now();
             return rows;
@@ -396,6 +419,8 @@
     const ROUTES = [
         { key: 'dashboard', icon: '📊', label: 'Dashboard' },
         { key: 'assets', icon: '💻', label: 'Assets' },
+        { key: 'people', icon: '👥', label: 'People' },
+        { key: 'licenses', icon: '🔑', label: 'Licenses' },
         { key: 'assignments', icon: '🔄', label: 'Assignments' },
         { key: 'spares', icon: '📦', label: 'Spares' },
         { key: 'locations', icon: '📍', label: 'Locations' },
@@ -437,6 +462,9 @@
             if (page === 'dashboard') return renderDashboard(el);
             if (page === 'assets') return id ? viewAssetDetails(el, id) : renderAssetsPage(el);
             if (page === 'asset') return viewAssetDetails(el, id);
+            if (page === 'people') return id ? viewPersonDetails(el, id) : renderPeoplePage(el);
+            if (page === 'person') return viewPersonDetails(el, id);
+            if (page === 'licenses') return renderLicensesPage(el);
             if (page === 'assignments') return renderAssignmentsPage(el);
             if (page === 'spares') return renderSparesPage(el);
             if (page === 'locations') return renderLocationsPage(el);
@@ -448,7 +476,7 @@
 
     /* ---------------------------------------------------------------- Dashboard */
     async function renderDashboard(el) {
-        const [assets, spares] = await Promise.all([store.getAll('assets'), store.getAll('sparing')]);
+        const [assets, spares, licenses] = await Promise.all([store.getAll('assets'), store.getAll('sparing'), store.getAll('licenses')]);
         const byStatus = {}; STATUSES.forEach(s => byStatus[s] = 0);
         assets.forEach(a => { byStatus[a.status] = (byStatus[a.status] || 0) + 1; });
         const active = assets.filter(a => !['Retired', 'Disposed', 'Lost'].includes(a.status));
@@ -459,6 +487,10 @@
             .sort((a, b) => new Date(a.warrantyExpiration) - new Date(b.warrantyExpiration));
         // low spares
         const lowSpare = computeSpareGaps(assets, spares).filter(g => g.gap > 0);
+        // licenses
+        const licRenew = licenses.filter(l => l.renewalDate && new Date(l.renewalDate).getTime() <= d60).sort((a, b) => new Date(a.renewalDate) - new Date(b.renewalDate));
+        const licOver = licenses.filter(l => Number(l.assignedSeats) > Number(l.totalSeats) && Number(l.totalSeats) > 0);
+        const licMonthly = licenses.reduce((s, l) => s + licenseMonthlyCost(l), 0);
 
         el.innerHTML = `
         <div class="page-head"><h1>Dashboard</h1>
@@ -470,9 +502,11 @@
           <div class="tile"><div class="k">In repair</div><div class="v">${byStatus['In Repair'] || 0}</div><div class="sub">out for service</div></div>
           <div class="tile"><div class="k">Fleet book value</div><div class="v">${money(totalBook) || '$0'}</div><div class="sub">depreciated, active only</div></div>
           <div class="tile"><div class="k">Low-spare models</div><div class="v">${lowSpare.length}</div><div class="sub">below min qty</div></div>
+          <div class="tile"><div class="k">Licenses / mo</div><div class="v">${money(Math.round(licMonthly)) || '$0'}</div><div class="sub">${licenses.length} products${licOver.length ? ` · ${licOver.length} over-assigned` : ''}</div></div>
         </div>
         <div class="panel"><h2>⚠️ Low spares (below minimum)</h2><div class="body">${lowSpare.length ? `<div class="table-wrap"><table><thead><tr><th>Category</th><th>Model</th><th class="right">On hand</th><th class="right">Min</th><th class="right">Target</th><th class="right">Order</th></tr></thead><tbody>${lowSpare.map(g => `<tr><td>${esc(g.category)}</td><td>${esc(g.model || '—')}</td><td class="right">${g.onHand}</td><td class="right">${g.min}</td><td class="right">${g.target}</td><td class="right"><strong>${g.gap}</strong></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">All spare levels are at or above minimum. 🎉</div>'}</div></div>
-        <div class="panel"><h2>⏰ Warranty expiring (next 60 days)</h2><div class="body">${warr.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Category</th><th>Model</th><th>Assigned to</th><th>Expires</th></tr></thead><tbody>${warr.map(a => { const soon = new Date(a.warrantyExpiration).getTime() <= d30; return `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${esc(a.category)}</td><td>${esc(a.model)}</td><td>${esc(a.assignedToName || '—')}</td><td><span class="badge ${soon ? 'b-bad' : 'b-warn'}">${fmtDate(a.warrantyExpiration)}</span></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No warranties expiring within 60 days.</div>'}</div></div>`;
+        <div class="panel"><h2>⏰ Warranty expiring (next 60 days)</h2><div class="body">${warr.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Category</th><th>Model</th><th>Assigned to</th><th>Expires</th></tr></thead><tbody>${warr.map(a => { const soon = new Date(a.warrantyExpiration).getTime() <= d30; return `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${esc(a.category)}</td><td>${esc(a.model)}</td><td>${esc(a.assignedToName || '—')}</td><td><span class="badge ${soon ? 'b-bad' : 'b-warn'}">${fmtDate(a.warrantyExpiration)}</span></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No warranties expiring within 60 days.</div>'}</div></div>
+        <div class="panel"><h2>🔑 License renewals (next 60 days)</h2><div class="body">${licRenew.length ? `<div class="table-wrap"><table><thead><tr><th>Product</th><th>Vendor</th><th class="right">Seats</th><th class="right">Est. / mo</th><th>Renews</th></tr></thead><tbody>${licRenew.map(l => { const soon = new Date(l.renewalDate).getTime() <= d30; return `<tr><td><a href="#/licenses">${esc(l.product)}</a></td><td>${esc(l.vendor)}</td><td class="right">${Number(l.assignedSeats) || 0} / ${Number(l.totalSeats) || '—'}</td><td class="right">${money(Math.round(licenseMonthlyCost(l)))}</td><td><span class="badge ${soon ? 'b-bad' : 'b-warn'}">${fmtDate(l.renewalDate)}</span></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No license renewals within 60 days.</div>'}</div></div>`;
     }
 
     /* ------------------------------------------------------------------- Assets */
@@ -775,7 +809,7 @@
         const [assets, spares] = await Promise.all([store.getAll('assets'), store.getAll('sparing')]);
         const gaps = computeSpareGaps(assets, spares);
         el.innerHTML = `
-        <div class="page-head"><h1>Spares</h1><div class="actions"><button class="btn primary" onclick="openSpareModal()">＋ New target</button></div></div>
+        <div class="page-head"><h1>Spares</h1><div class="actions"><button class="btn" onclick="openImportModal('spares')">⬆️ Import</button><button class="btn primary" onclick="openSpareModal()">＋ New target</button></div></div>
         <p class="muted">On-hand counts assets in <em>In Stock</em> or <em>Spare</em> status matching the category (and model, if the target names one).</p>
         <div class="table-wrap panel"><table><thead><tr><th>Category</th><th>Model</th><th class="right">On hand</th><th class="right">Min</th><th class="right">Target</th><th>Status</th><th>Actions</th></tr></thead><tbody>
         ${gaps.map(g => `<tr><td>${esc(g.category)}</td><td>${esc(g.model || '—')}</td><td class="right">${g.onHand}</td><td class="right">${g.min}</td><td class="right">${g.target}</td><td>${g.gap > 0 ? `<span class="badge b-bad">Order ${g.gap}</span>` : (g.onHand < g.target ? '<span class="badge b-warn">Below target</span>' : '<span class="badge b-ok">OK</span>')}</td><td><button class="btn sm" onclick="openSpareModal('${esc(g._spItemId)}')">Edit</button></td></tr>`).join('')}
@@ -809,7 +843,7 @@
         const locations = await store.getAll('locations');
         const assets = await store.getAll('assets');
         el.innerHTML = `
-        <div class="page-head"><h1>Locations</h1><div class="actions"><button class="btn primary" onclick="openLocationModal()">＋ New location</button></div></div>
+        <div class="page-head"><h1>Locations</h1><div class="actions"><button class="btn" onclick="openImportModal('locations')">⬆️ Import</button><button class="btn primary" onclick="openLocationModal()">＋ New location</button></div></div>
         <div class="table-wrap panel"><table><thead><tr><th>Location</th><th>Type</th><th>Address</th><th class="right">Assets</th><th>Actions</th></tr></thead><tbody>
         ${locations.map(l => `<tr><td><strong>${esc(l.locId)}</strong></td><td>${esc(l.locType)}</td><td>${esc(l.address)}</td><td class="right">${assets.filter(a => a.locationId === l.locId).length}</td><td><button class="btn sm" onclick="openLocationModal('${esc(l._spItemId)}')">Edit</button></td></tr>`).join('')}
         </tbody></table></div>
@@ -836,6 +870,118 @@
         catch (e) { toast('Save failed: ' + e.message, 'bad'); }
     }
     async function deleteLocation(spItemId) { if (!confirm('Delete this location?')) return; try { await store.remove('locations', spItemId); toast('Deleted.', 'ok'); closeModal(); router(); } catch (e) { toast('Delete failed: ' + e.message, 'bad'); } }
+
+    /* ------------------------------------------------------------------ Licenses */
+    function licenseMonthlyCost(l) {
+        const cost = Number(l.unitCost) || 0, seats = Number(l.assignedSeats) || Number(l.totalSeats) || 0;
+        const factor = l.billingCycle === 'Annual' ? 1 / 12 : (l.billingCycle === 'One-time' ? 0 : 1);
+        return cost * seats * factor;
+    }
+    async function renderLicensesPage(el) {
+        const licenses = await store.getAll('licenses');
+        const now = Date.now();
+        const util = l => { const t = Number(l.totalSeats) || 0, a = Number(l.assignedSeats) || 0; return t ? Math.round(a / t * 100) : 0; };
+        el.innerHTML = `
+        <div class="page-head"><h1>Licenses &amp; subscriptions</h1>
+          <div class="actions">
+            <button class="btn" onclick="openImportModal('licenses')">⬆️ Import</button>
+            <button class="btn primary" onclick="openLicenseModal()">＋ New license</button>
+          </div></div>
+        <div class="toolbar"><input class="search" id="licSearch" placeholder="🔎 Search licenses…"></div>
+        <div class="table-wrap panel"><table id="licTable" class="js-colfilter"><thead><tr>
+          <th>Product</th><th>Vendor</th><th>Type</th><th class="right">Seats</th><th>Utilization</th><th class="right">Unit</th><th class="right">Est. / mo</th><th>Renews</th><th>Actions</th>
+        </tr></thead><tbody>
+        ${licenses.sort((a, b) => a.product.localeCompare(b.product)).map(l => {
+            const u = util(l), t = Number(l.totalSeats) || 0, a = Number(l.assignedSeats) || 0;
+            const over = a > t && t > 0, renewSoon = l.renewalDate && new Date(l.renewalDate).getTime() <= now + 60 * 864e5;
+            const barColor = over ? 'var(--bad)' : (u >= 90 ? 'var(--warn)' : 'var(--ok)');
+            return `<tr>
+              <td><strong>${esc(l.product)}</strong></td><td>${esc(l.vendor)}</td><td>${esc(l.licenseType)}</td>
+              <td class="right">${a} / ${t || '—'}</td>
+              <td><div style="background:var(--panel2);border-radius:6px;height:8px;width:90px;overflow:hidden"><div style="height:8px;width:${Math.min(100, u)}%;background:${barColor}"></div></div><small class="muted">${u}%${over ? ' ⚠ over' : ''}</small></td>
+              <td class="right">${money(l.unitCost)}</td><td class="right">${money(Math.round(licenseMonthlyCost(l)))}</td>
+              <td>${l.renewalDate ? `<span class="badge ${renewSoon ? 'b-warn' : 'b-mut'}">${fmtDate(l.renewalDate)}</span>` : '—'}</td>
+              <td><button class="btn sm" onclick="openLicenseModal('${esc(l._spItemId)}')">Edit</button></td></tr>`;
+        }).join('')}
+        </tbody></table></div>
+        ${licenses.length ? `<p class="muted">Estimated total: <strong>${money(Math.round(licenses.reduce((s, l) => s + licenseMonthlyCost(l), 0)))}/mo</strong> · ${money(Math.round(licenses.reduce((s, l) => s + licenseMonthlyCost(l) * 12, 0)))}/yr (based on assigned seats).</p>` : '<div class="empty">No licenses yet. Add one, import a CSV, or run the O365 LicenseSync flow.</div>'}`;
+        const table = document.getElementById('licTable'); enableColumnFilters(table, 'licenses');
+        document.getElementById('licSearch').addEventListener('input', e => { table._searchTerm = e.target.value; applyTableFilters(table); });
+    }
+    async function openLicenseModal(spItemId) {
+        const licenses = await store.getAll('licenses');
+        const l = spItemId ? licenses.find(x => x._spItemId === spItemId) : null;
+        const opt = (arr, sel) => arr.map(v => `<option ${v === sel ? 'selected' : ''}>${esc(v)}</option>`).join('');
+        openModal(`
+        <div class="m-head"><h3>${l ? 'Edit' : 'New'} license</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-body"><div class="grid3">
+          <div class="field"><label>Product *</label><input id="lc_product" value="${esc(l?.product || '')}" ${l ? 'readonly' : ''}></div>
+          <div class="field"><label>Vendor</label><input id="lc_vendor" value="${esc(l?.vendor || '')}"></div>
+          <div class="field"><label>Type</label><select id="lc_type"><option value=""></option>${opt(LICENSE_TYPES, l?.licenseType)}</select></div>
+          <div class="field"><label>SKU part number</label><input id="lc_sku" value="${esc(l?.skuPartNumber || '')}" placeholder="e.g. SPE_E3"></div>
+          <div class="field"><label>Total seats</label><input type="number" id="lc_total" value="${esc(l?.totalSeats || '')}"></div>
+          <div class="field"><label>Assigned seats</label><input type="number" id="lc_assigned" value="${esc(l?.assignedSeats || '')}"></div>
+          <div class="field"><label>Unit cost ($)</label><input type="number" id="lc_cost" value="${esc(l?.unitCost || '')}"></div>
+          <div class="field"><label>Billing cycle</label><select id="lc_cycle"><option value=""></option>${opt(BILLING_CYCLES, l?.billingCycle)}</select></div>
+          <div class="field"><label>Renewal date</label><input type="date" id="lc_renew" value="${toDateInput(l?.renewalDate)}"></div>
+          <div class="field"><label>Owner</label><input id="lc_owner" value="${esc(l?.owner || '')}"></div>
+        </div><div class="field"><label>Notes</label><textarea id="lc_notes">${esc(l?.notes || '')}</textarea></div></div>
+        <div class="m-foot">${l ? `<button class="btn danger" onclick="deleteLicense('${esc(l._spItemId)}')">Delete</button>` : ''}<button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="saveLicense('${l ? esc(l._spItemId) : ''}')">Save</button></div>`, true);
+    }
+    async function saveLicense(spItemId) {
+        const g = id => document.getElementById(id).value.trim();
+        const product = g('lc_product'); if (!product) { toast('Product is required.', 'bad'); return; }
+        const obj = { product, vendor: g('lc_vendor'), licenseType: g('lc_type'), skuPartNumber: g('lc_sku'),
+            totalSeats: g('lc_total') === '' ? '' : Number(g('lc_total')), assignedSeats: g('lc_assigned') === '' ? '' : Number(g('lc_assigned')),
+            unitCost: g('lc_cost') === '' ? '' : Number(g('lc_cost')), billingCycle: g('lc_cycle'), renewalDate: fromDateInput(g('lc_renew')), owner: g('lc_owner'), notes: g('lc_notes') };
+        try { if (spItemId) await store.update('licenses', spItemId, obj); else await store.add('licenses', obj); toast('License saved.', 'ok'); closeModal(); router(); }
+        catch (e) { toast('Save failed: ' + e.message, 'bad'); }
+    }
+    async function deleteLicense(spItemId) { if (!confirm('Delete this license?')) return; try { await store.remove('licenses', spItemId); toast('Deleted.', 'ok'); closeModal(); router(); } catch (e) { toast('Delete failed: ' + e.message, 'bad'); } }
+
+    /* -------------------------------------------------------------------- People */
+    function personKeyOf(name, upn) { return (upn || name || '').toLowerCase(); }
+    async function renderPeoplePage(el) {
+        const [assignments, assets, lic] = await Promise.all([store.getAll('assignments'), store.getAll('assets'), store.getAll('licenseAssignments')]);
+        const people = {};
+        const touch = (name, upn) => { const k = personKeyOf(name, upn); if (!k) return null; if (!people[k]) people[k] = { name: name || upn, upn: upn || '', held: 0, licenses: 0 }; if (name && !people[k].name) people[k].name = name; if (upn && !people[k].upn) people[k].upn = upn; return people[k]; };
+        assignments.filter(a => !a.returnedDate).forEach(a => { const p = touch(a.personName, a.personUpn); if (p) p.held++; });
+        lic.forEach(a => { const p = touch(a.personName, a.personUpn); if (p) p.licenses++; });
+        const list = Object.values(people).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        el.innerHTML = `
+        <div class="page-head"><h1>People</h1><div class="muted">${list.length} people currently holding assets or licenses</div></div>
+        <div class="toolbar"><input class="search" id="pplSearch" placeholder="🔎 Search people…"></div>
+        <div class="table-wrap panel"><table id="pplTable"><thead><tr><th>Person</th><th>Email</th><th class="right">Hardware held</th><th class="right">Licenses</th><th>Actions</th></tr></thead><tbody>
+        ${list.map(p => `<tr><td><strong>${esc(p.name)}</strong></td><td>${esc(p.upn)}</td><td class="right">${p.held}</td><td class="right">${p.licenses}</td><td><a class="btn sm" href="#/person/${encodeURIComponent(p.upn || p.name)}">View / offboard</a></td></tr>`).join('')}
+        </tbody></table></div>
+        ${list.length ? '' : '<div class="empty">No one is currently holding assets. Check out an asset to a person to populate this.</div>'}`;
+        const table = document.getElementById('pplTable');
+        document.getElementById('pplSearch').addEventListener('input', e => { const v = e.target.value.toLowerCase(); [...table.tBodies[0].rows].forEach(r => { r.style.display = r.textContent.toLowerCase().includes(v) ? '' : 'none'; }); });
+    }
+    async function viewPersonDetails(el, key) {
+        const [assignments, assets, lic, catalog] = await Promise.all([store.getAll('assignments'), store.getAll('assets'), store.getAll('licenseAssignments'), store.getAll('licenses')]);
+        const k = decodeURIComponent(key).toLowerCase();
+        const match = x => personKeyOf(x.personName, x.personUpn) === k;
+        const mine = assignments.filter(match);
+        const openHeld = mine.filter(a => !a.returnedDate);
+        const myLic = lic.filter(match);
+        const skuCost = sku => { const c = catalog.find(x => x.skuPartNumber && x.skuPartNumber === sku); return c ? licenseMonthlyCost({ ...c, assignedSeats: 1, totalSeats: 1 }) : 0; };
+        const myLicMonthly = myLic.reduce((s, a) => s + skuCost(a.skuPartNumber), 0);
+        const person = mine[0] || myLic[0] || { personName: decodeURIComponent(key), personUpn: '' };
+        const name = person.personName || person.personUpn;
+        const assetByTag = t => assets.find(a => a.assetTag === t);
+        el.innerHTML = `
+        <div class="page-head"><h1>👤 ${esc(name)}</h1></div>
+        <a href="#/people" class="muted">← All people</a>
+        <div class="tiles" style="margin-top:12px">
+          <div class="tile"><div class="k">Hardware held</div><div class="v">${openHeld.length}</div><div class="sub">to return on offboarding</div></div>
+          <div class="tile"><div class="k">Licenses assigned</div><div class="v">${myLic.length}</div><div class="sub">to revoke on offboarding</div></div>
+          <div class="tile"><div class="k">Est. license cost</div><div class="v">${money(Math.round(myLicMonthly)) || '$0'}</div><div class="sub">per month, reclaimable</div></div>
+        </div>
+        <div class="panel"><h2>💻 Currently held hardware (offboarding checklist)</h2><div class="body">${openHeld.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Category</th><th>Model</th><th>Since</th><th>Action</th></tr></thead><tbody>${openHeld.map(a => { const as = assetByTag(a.assetTag); return `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${esc(as?.category || '')}</td><td>${esc(as?.model || '')}</td><td>${fmtDate(a.issuedDate)}</td><td>${as ? `<button class="btn sm" onclick="checkInAsset('${esc(a.assetTag)}')">Check in</button>` : '<span class="muted">asset missing</span>'}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No hardware currently held. ✓</div>'}</div></div>
+        <div class="panel"><h2>🔑 Assigned licenses</h2><div class="body">${myLic.length ? `<div class="table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>Assigned</th></tr></thead><tbody>${myLic.map(a => `<tr><td>${esc(a.product)}</td><td>${esc(a.skuPartNumber)}</td><td>${fmtDate(a.assignedDate)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No licenses recorded for this person. (Run the O365 LicenseSync flow to auto-populate.)</div>'}</div></div>
+        <div class="panel"><h2>🔄 Full custody history</h2><div class="body">${mine.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Issued</th><th>Returned</th></tr></thead><tbody>${mine.sort((p, q) => new Date(q.issuedDate) - new Date(p.issuedDate)).map(a => `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${fmtDate(a.issuedDate)}</td><td>${a.returnedDate ? fmtDate(a.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No custody records.</div>'}</div></div>`;
+    }
 
     /* -------------------------------------------------------------------- Health */
     async function renderHealthPage(el) {
@@ -914,46 +1060,86 @@
     }
 
     /* --------------------------------------------------------------- CSV import/export */
-    function openImportModal() {
+    // Per-entity import specs: canonical headers, field aliases, defaults, dedup key.
+    const IMPORT_SPECS = {
+        assets: { entity: 'assets', title: 'Assets', goto: '#/assets',
+            fields: [ ['AssetTag','assetTag'],['SerialNumber','serialNumber'],['Category','category'],['Make','make'],['Model','model'],['Status','status'],['Condition','condition'],['ExpectReturn','expectReturn'],['LocationId','locationId'],['PONumber','poNumber'],['Vendor','vendor'],['PurchaseDate','purchaseDate','date'],['PurchaseCost','purchaseCost','num'],['DepreciationYears','depreciationYears','num'],['SalvageValue','salvageValue','num'],['WarrantyExpiration','warrantyExpiration','date'],['Notes','notes'] ],
+            aliases: { serial: 'serialNumber', location: 'locationId', po: 'poNumber', cost: 'purchaseCost', warranty: 'warrantyExpiration' },
+            defaults: { status: 'In Stock' }, dedup: o => String(o.assetTag) },
+        locations: { entity: 'locations', title: 'Locations', goto: '#/locations',
+            fields: [ ['LocationId','locId'],['LocType','locType'],['Address','address'],['Notes','notes'] ],
+            aliases: { location: 'locId', name: 'locId', type: 'locType' }, defaults: {}, dedup: o => String(o.locId) },
+        spares: { entity: 'sparing', title: 'Sparing targets', goto: '#/spares',
+            fields: [ ['Category','category'],['Model','model'],['MinQty','minQty','num'],['TargetQty','targetQty','num'],['Notes','notes'] ],
+            aliases: { min: 'minQty', target: 'targetQty' }, defaults: {}, dedup: o => o.model ? `${o.category}|${o.model}` : String(o.category),
+            finalize: o => { o.key = o.model ? `${o.category}|${o.model}` : o.category; return o; } },
+        licenses: { entity: 'licenses', title: 'Licenses', goto: '#/licenses',
+            fields: [ ['Product','product'],['Vendor','vendor'],['LicenseType','licenseType'],['SkuPartNumber','skuPartNumber'],['TotalSeats','totalSeats','num'],['AssignedSeats','assignedSeats','num'],['UnitCost','unitCost','num'],['BillingCycle','billingCycle'],['RenewalDate','renewalDate','date'],['Owner','owner'],['Notes','notes'] ],
+            aliases: { productname: 'product', sku: 'skuPartNumber', seats: 'totalSeats', cost: 'unitCost', cycle: 'billingCycle', renewal: 'renewalDate' }, defaults: {}, dedup: o => String(o.product) }
+    };
+    const _impNorm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+    function _impColmap(spec) {
+        const m = {}; const byField = {};
+        spec.fields.forEach(f => { m[_impNorm(f[0])] = f; m[_impNorm(f[1])] = f; byField[f[1]] = f; });
+        Object.entries(spec.aliases || {}).forEach(([a, field]) => { if (byField[field]) m[_impNorm(a)] = byField[field]; });
+        return m;
+    }
+    function _impCoerce(v, t) { if (t === 'num') return v === '' || v == null ? '' : Number(v); if (t === 'date') return v ? fromDateInput(toDateInput(v)) : ''; return v == null ? '' : String(v).trim(); }
+    let _importRows = [], _importSpecKey = 'assets';
+    function openImportModal(specKey) {
+        _importSpecKey = specKey && IMPORT_SPECS[specKey] ? specKey : 'assets';
+        const spec = IMPORT_SPECS[_importSpecKey];
+        const key = spec.fields[0][0];
         openModal(`
-        <div class="m-head"><h3>Import assets (CSV / Excel)</h3><button class="x" onclick="closeModal()">×</button></div>
+        <div class="m-head"><h3>Import ${esc(spec.title)} (CSV / Excel)</h3><button class="x" onclick="closeModal()">×</button></div>
         <div class="m-body">
-          <p class="muted">Header row should include <strong>AssetTag</strong> (required). Recognized columns: AssetTag, SerialNumber, Category, Make, Model, Status, Condition, ExpectReturn, LocationId, PONumber, Vendor, PurchaseDate, PurchaseCost, DepreciationYears, SalvageValue, WarrantyExpiration, Notes. Existing tags are skipped (no overwrite).</p>
+          <p class="muted">Header row must include <strong>${esc(key)}</strong> (required). Recognized columns: ${spec.fields.map(f => esc(f[0])).join(', ')}. Existing records (matched on ${esc(key)}) are skipped — never overwritten.</p>
+          <p><button class="btn sm" onclick="downloadImportTemplate('${_importSpecKey}')">⬇️ Download blank template</button></p>
           <input type="file" id="imp_file" accept=".csv,.xlsx,.xls">
           <div id="imp_preview" style="margin-top:12px"></div>
         </div>
         <div class="m-foot"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" id="imp_go" disabled onclick="runImport()">Import</button></div>`, true);
         document.getElementById('imp_file').addEventListener('change', previewImport);
     }
-    let _importRows = [];
+    function downloadImportTemplate(specKey) {
+        const spec = IMPORT_SPECS[specKey]; const headers = spec.fields.map(f => f[0]);
+        const ws = XLSX.utils.aoa_to_sheet([headers]);
+        const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, spec.title);
+        XLSX.writeFile(wb, `itinventory-template-${specKey}.csv`);
+    }
     function previewImport(e) {
         const file = e.target.files[0]; if (!file) return;
+        const spec = IMPORT_SPECS[_importSpecKey], colmap = _impColmap(spec), keyField = spec.fields[0][1];
         const reader = new FileReader();
         reader.onload = ev => {
             try {
                 const wb = XLSX.read(ev.target.result, { type: 'binary' });
                 const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
-                const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
-                const cols = { assettag: 'assetTag', serialnumber: 'serialNumber', serial: 'serialNumber', category: 'category', make: 'make', model: 'model', status: 'status', condition: 'condition', expectreturn: 'expectReturn', locationid: 'locationId', location: 'locationId', ponumber: 'poNumber', po: 'poNumber', vendor: 'vendor', purchasedate: 'purchaseDate', purchasecost: 'purchaseCost', cost: 'purchaseCost', depreciationyears: 'depreciationYears', salvagevalue: 'salvageValue', warrantyexpiration: 'warrantyExpiration', warranty: 'warrantyExpiration', notes: 'notes' };
-                _importRows = rows.map(r => { const o = {}; Object.entries(r).forEach(([k, v]) => { const f = cols[norm(k)]; if (f) o[f] = v; }); return o; }).filter(o => o.assetTag);
-                document.getElementById('imp_preview').innerHTML = `<strong>${_importRows.length}</strong> rows with an AssetTag detected.` + (_importRows.length ? ` First: ${esc(_importRows[0].assetTag)}` : '');
+                _importRows = rows.map(r => {
+                    const o = Object.assign({}, spec.defaults);
+                    Object.entries(r).forEach(([k, v]) => { const f = colmap[_impNorm(k)]; if (f) o[f[1]] = _impCoerce(v, f[2]); });
+                    return o;
+                }).filter(o => o[keyField] !== '' && o[keyField] != null);
+                document.getElementById('imp_preview').innerHTML = `<strong>${_importRows.length}</strong> rows detected.` + (_importRows.length ? ` First: ${esc(_importRows[0][keyField])}` : '');
                 document.getElementById('imp_go').disabled = !_importRows.length;
-            } catch (err) { document.getElementById('imp_preview').innerHTML = `<span style="color:#b91c1c">Parse error: ${esc(err.message)}</span>`; }
+            } catch (err) { document.getElementById('imp_preview').innerHTML = `<span style="color:var(--bad)">Parse error: ${esc(err.message)}</span>`; }
         };
         reader.readAsBinaryString(file);
     }
     async function runImport() {
-        const existing = new Set((await store.getAll('assets')).map(a => a.assetTag));
+        const spec = IMPORT_SPECS[_importSpecKey];
+        const existing = new Set((await store.getAll(spec.entity)).map(spec.dedup));
         let added = 0, skipped = 0, failed = 0;
         document.getElementById('imp_go').disabled = true;
         for (const r of _importRows) {
-            if (existing.has(String(r.assetTag))) { skipped++; continue; }
-            const obj = { assetTag: String(r.assetTag), serialNumber: r.serialNumber || '', category: r.category || '', make: r.make || '', model: r.model || '', status: r.status || 'In Stock', condition: r.condition || '', expectReturn: r.expectReturn || '', locationId: r.locationId || '', poNumber: r.poNumber || '', vendor: r.vendor || '', purchaseDate: r.purchaseDate ? fromDateInput(toDateInput(r.purchaseDate)) : '', purchaseCost: r.purchaseCost === '' ? '' : Number(r.purchaseCost), depreciationYears: r.depreciationYears === '' ? '' : Number(r.depreciationYears), salvageValue: r.salvageValue === '' ? '' : Number(r.salvageValue), warrantyExpiration: r.warrantyExpiration ? fromDateInput(toDateInput(r.warrantyExpiration)) : '', notes: r.notes || '' };
-            try { await store.add('assets', obj); added++; existing.add(obj.assetTag); } catch (e) { failed++; }
+            const dk = spec.dedup(r);
+            if (existing.has(dk)) { skipped++; continue; }
+            const obj = spec.finalize ? spec.finalize(r) : r;
+            try { await store.add(spec.entity, obj); added++; existing.add(dk); } catch (e) { failed++; }
             document.getElementById('imp_preview').innerHTML = `Importing… ${added} added, ${skipped} skipped${failed ? ', ' + failed + ' failed' : ''}`;
         }
         toast(`Import done: ${added} added, ${skipped} skipped${failed ? ', ' + failed + ' failed' : ''}.`, failed ? 'bad' : 'ok');
-        closeModal(); go('#/assets'); router();
+        closeModal(); go(spec.goto); router();
     }
     async function exportAssetsCsv() {
         const assets = await store.getAll('assets');
