@@ -603,11 +603,34 @@
     }
 
     async function deleteAsset(assetTag) {
-        if (!confirm(`Delete asset ${assetTag}? This cannot be undone.`)) return;
-        const a = (await store.getAll('assets')).find(x => x.assetTag === assetTag);
+        const [assets, assignments, disposals] = await Promise.all([store.getAll('assets'), store.getAll('assignments'), store.getAll('disposals')]);
+        const a = assets.find(x => x.assetTag === assetTag);
         if (!a) return;
-        try { await store.remove('assets', a._spItemId); toast('Asset deleted.', 'ok'); closeModal(); go('#/assets'); router(); }
-        catch (e) { toast('Delete failed: ' + e.message, 'bad'); }
+        const asg = assignments.filter(x => x.assetTag === assetTag);
+        const dsp = disposals.filter(x => x.assetTag === assetTag);
+        const extra = (asg.length || dsp.length) ? `\n\nThis will also remove ${asg.length} custody record(s) and ${dsp.length} disposal record(s) for this asset.` : '';
+        if (!confirm(`Delete asset ${assetTag}? This cannot be undone.${extra}`)) return;
+        try {
+            await store.remove('assets', a._spItemId);
+            for (const x of asg) await store.remove('assignments', x._spItemId);
+            for (const x of dsp) await store.remove('disposals', x._spItemId);
+            toast(`Deleted ${assetTag}${asg.length + dsp.length ? ` + ${asg.length + dsp.length} related record(s)` : ''}.`, 'ok');
+            closeModal(); go('#/assets'); router();
+        } catch (e) { toast('Delete failed: ' + e.message, 'bad'); }
+    }
+    async function deleteAssignment(spItemId) {
+        if (!confirm('Remove this custody record? (This does not change the asset itself.)')) return;
+        try { await store.remove('assignments', spItemId); toast('Custody record removed.', 'ok'); router(); }
+        catch (e) { toast('Remove failed: ' + e.message, 'bad'); }
+    }
+    async function cleanOrphanAssignments() {
+        const [assignments, assets] = await Promise.all([store.getAll('assignments'), store.getAll('assets')]);
+        const tags = new Set(assets.map(a => a.assetTag));
+        const orphans = assignments.filter(x => x.assetTag && !tags.has(x.assetTag));
+        if (!orphans.length) { toast('No orphan custody records.', 'ok'); return; }
+        if (!confirm(`Remove ${orphans.length} custody record(s) that point to deleted assets?`)) return;
+        let n = 0; for (const x of orphans) { try { await store.remove('assignments', x._spItemId); n++; } catch (e) { } }
+        toast(`Removed ${n} orphan record(s).`, 'ok'); router();
     }
 
     async function viewAssetDetails(el, assetTag) {
@@ -645,7 +668,7 @@
             ${row('Warranty expires', fmtDate(a.warrantyExpiration))}
           </table></div></div>
         </div>
-        <div class="panel"><h2>🔄 Custody history</h2><div class="body">${hist.length ? `<div class="table-wrap"><table><thead><tr><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th></tr></thead><tbody>${hist.map(x => `<tr><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td>${fmtDate(x.issuedDate)}</td><td>${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No custody records yet.</div>'}</div></div>
+        <div class="panel"><h2>🔄 Custody history</h2><div class="body">${hist.length ? `<div class="table-wrap"><table><thead><tr><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th><th>Actions</th></tr></thead><tbody>${hist.map(x => `<tr><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td>${fmtDate(x.issuedDate)}</td><td>${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td><td class="nowrap"><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No custody records yet.</div>'}</div></div>
         ${disp.length ? `<div class="panel"><h2>🗑️ Disposal / data-wipe</h2><div class="body"><div class="table-wrap"><table><thead><tr><th>Retired</th><th>Method</th><th>Data wipe</th><th>Wipe method</th><th>Cert</th><th>By</th></tr></thead><tbody>${disp.map(d => `<tr><td>${fmtDate(d.retiredDate)}</td><td>${esc(d.disposalMethod)}</td><td>${esc(d.dataWipeStatus)}</td><td>${esc(d.dataWipeMethod)}</td><td>${esc(d.certRef)}</td><td>${esc(d.disposedBy)}</td></tr>`).join('')}</tbody></table></div></div></div>` : ''}`;
     }
 
@@ -783,13 +806,14 @@
 
     /* --------------------------------------------------------------- Assignments */
     async function renderAssignmentsPage(el) {
-        const assignments = await store.getAll('assignments');
+        const [assignments, assets] = await Promise.all([store.getAll('assignments'), store.getAll('assets')]);
+        const assetTags = new Set(assets.map(a => a.assetTag));
         const sorted = assignments.sort((p, q) => new Date(q.issuedDate) - new Date(p.issuedDate));
         el.innerHTML = `
         <div class="page-head"><h1>Assignments</h1><div class="muted">${assignments.length} custody records · ${assignments.filter(x => !x.returnedDate).length} currently out</div></div>
         <div class="toolbar"><input class="search" id="asgSearch" placeholder="🔎 Search…"></div>
-        <div class="table-wrap panel"><table id="asgTable"><thead><tr><th>Asset</th><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th></tr></thead><tbody>
-        ${sorted.map(x => `<tr><td class="nowrap"><a href="#/asset/${encodeURIComponent(x.assetTag)}">${esc(x.assetTag)}</a></td><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td class="nowrap">${fmtDate(x.issuedDate)}</td><td class="nowrap">${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td></tr>`).join('')}
+        <div class="table-wrap panel"><table id="asgTable" class="js-colfilter"><thead><tr><th>Asset</th><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th><th>Actions</th></tr></thead><tbody>
+        ${sorted.map(x => { const missing = !assetTags.has(x.assetTag); return `<tr><td class="nowrap">${missing ? `${esc(x.assetTag)} <span class="badge b-bad">deleted</span>` : `<a href="#/asset/${encodeURIComponent(x.assetTag)}">${esc(x.assetTag)}</a>`}</td><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td class="nowrap">${fmtDate(x.issuedDate)}</td><td class="nowrap">${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td><td class="nowrap"><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></td></tr>`; }).join('')}
         </tbody></table></div>
         ${assignments.length ? '' : '<div class="empty">No assignments yet. Check out an asset to create custody history.</div>'}`;
         const table = document.getElementById('asgTable'); enableColumnFilters(table, 'assignments');
@@ -1011,7 +1035,7 @@
         <h3 class="muted">Integrity</h3>
         ${section('Duplicate serial numbers', 'b-bad', dupSerial, () => dupSerial.map(([s, v]) => `<div>Serial <strong>${esc(s)}</strong>: ${v.map(a => link(a.assetTag)).join(', ')}</div>`).join(''))}
         ${section('Duplicate asset tags', 'b-bad', dupTag, () => dupTag.map(([t, v]) => `<div>Tag <strong>${esc(t)}</strong> appears ${v.length}×</div>`).join(''))}
-        ${section('Assignments for missing assets', 'b-bad', orphanAssign, () => orphanAssign.map(x => `<div>${esc(x.assetTag)} → ${esc(x.personName)} (asset not found)</div>`).join(''))}
+        ${section('Assignments for missing assets', 'b-bad', orphanAssign, () => `${orphanAssign.length > 1 ? `<p><button class="btn sm danger" onclick="cleanOrphanAssignments()">🧹 Remove all ${orphanAssign.length}</button></p>` : ''}` + orphanAssign.map(x => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0"><span>${esc(x.assetTag)} → ${esc(x.personName)} <span class="muted">(asset not found)</span></span><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></div>`).join(''))}
         ${section('Assets in an unknown location', 'b-warn', badLoc, () => badLoc.map(a => `<div>${link(a.assetTag)} → location “${esc(a.locationId)}” not in Locations</div>`).join(''))}
         ${section('Deployed but no open custody record', 'b-warn', deployedNoOpen, () => deployedNoOpen.map(a => `<div>${link(a.assetTag)} — status Deployed, no open assignment</div>`).join(''))}
         <h3 class="muted">Completeness</h3>
