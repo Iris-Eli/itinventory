@@ -476,7 +476,7 @@
 
     /* ---------------------------------------------------------------- Dashboard */
     async function renderDashboard(el) {
-        const [assets, spares, licenses] = await Promise.all([store.getAll('assets'), store.getAll('sparing'), store.getAll('licenses')]);
+        const [assets, spares, licenses, licAssign] = await Promise.all([store.getAll('assets'), store.getAll('sparing'), store.getAll('licenses'), store.getAll('licenseAssignments')]);
         const byStatus = {}; STATUSES.forEach(s => byStatus[s] = 0);
         assets.forEach(a => { byStatus[a.status] = (byStatus[a.status] || 0) + 1; });
         const active = assets.filter(a => !['Retired', 'Disposed', 'Lost'].includes(a.status));
@@ -489,8 +489,8 @@
         const lowSpare = computeSpareGaps(assets, spares).filter(g => g.gap > 0);
         // licenses
         const licRenew = licenses.filter(l => l.renewalDate && new Date(l.renewalDate).getTime() <= d60).sort((a, b) => new Date(a.renewalDate) - new Date(b.renewalDate));
-        const licOver = licenses.filter(l => Number(l.assignedSeats) > Number(l.totalSeats) && Number(l.totalSeats) > 0);
-        const licMonthly = licenses.reduce((s, l) => s + licenseMonthlyCost(l), 0);
+        const licOver = licenses.filter(l => licenseAssigned(l, licAssign) > Number(l.totalSeats) && Number(l.totalSeats) > 0);
+        const licMonthly = licenses.reduce((s, l) => s + licenseMonthlyCost(l, licenseAssigned(l, licAssign)), 0);
 
         el.innerHTML = `
         <div class="page-head"><h1>Dashboard</h1>
@@ -506,7 +506,7 @@
         </div>
         <div class="panel"><h2>⚠️ Low spares (below minimum)</h2><div class="body">${lowSpare.length ? `<div class="table-wrap"><table><thead><tr><th>Category</th><th>Model</th><th class="right">On hand</th><th class="right">Min</th><th class="right">Target</th><th class="right">Order</th></tr></thead><tbody>${lowSpare.map(g => `<tr><td>${esc(g.category)}</td><td>${esc(g.model || '—')}</td><td class="right">${g.onHand}</td><td class="right">${g.min}</td><td class="right">${g.target}</td><td class="right"><strong>${g.gap}</strong></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">All spare levels are at or above minimum. 🎉</div>'}</div></div>
         <div class="panel"><h2>⏰ Warranty expiring (next 60 days)</h2><div class="body">${warr.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Category</th><th>Model</th><th>Assigned to</th><th>Expires</th></tr></thead><tbody>${warr.map(a => { const soon = new Date(a.warrantyExpiration).getTime() <= d30; return `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${esc(a.category)}</td><td>${esc(a.model)}</td><td>${esc(a.assignedToName || '—')}</td><td><span class="badge ${soon ? 'b-bad' : 'b-warn'}">${fmtDate(a.warrantyExpiration)}</span></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No warranties expiring within 60 days.</div>'}</div></div>
-        <div class="panel"><h2>🔑 License renewals (next 60 days)</h2><div class="body">${licRenew.length ? `<div class="table-wrap"><table><thead><tr><th>Product</th><th>Vendor</th><th class="right">Seats</th><th class="right">Est. / mo</th><th>Renews</th></tr></thead><tbody>${licRenew.map(l => { const soon = new Date(l.renewalDate).getTime() <= d30; return `<tr><td><a href="#/licenses">${esc(l.product)}</a></td><td>${esc(l.vendor)}</td><td class="right">${Number(l.assignedSeats) || 0} / ${Number(l.totalSeats) || '—'}</td><td class="right">${money(Math.round(licenseMonthlyCost(l)))}</td><td><span class="badge ${soon ? 'b-bad' : 'b-warn'}">${fmtDate(l.renewalDate)}</span></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No license renewals within 60 days.</div>'}</div></div>`;
+        <div class="panel"><h2>🔑 License renewals (next 60 days)</h2><div class="body">${licRenew.length ? `<div class="table-wrap"><table><thead><tr><th>Product</th><th>Vendor</th><th class="right">Seats</th><th class="right">Est. / mo</th><th>Renews</th></tr></thead><tbody>${licRenew.map(l => { const soon = new Date(l.renewalDate).getTime() <= d30; const a = licenseAssigned(l, licAssign); return `<tr><td><a href="#/licenses">${esc(l.product)}</a></td><td>${esc(l.vendor)}</td><td class="right">${a} / ${Number(l.totalSeats) || '—'}</td><td class="right">${money(Math.round(licenseMonthlyCost(l, a)))}</td><td><span class="badge ${soon ? 'b-bad' : 'b-warn'}">${fmtDate(l.renewalDate)}</span></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No license renewals within 60 days.</div>'}</div></div>`;
     }
 
     /* ------------------------------------------------------------------- Assets */
@@ -893,18 +893,36 @@
         try { if (spItemId) await store.update('locations', spItemId, obj); else await store.add('locations', obj); toast('Saved.', 'ok'); closeModal(); router(); }
         catch (e) { toast('Save failed: ' + e.message, 'bad'); }
     }
-    async function deleteLocation(spItemId) { if (!confirm('Delete this location?')) return; try { await store.remove('locations', spItemId); toast('Deleted.', 'ok'); closeModal(); router(); } catch (e) { toast('Delete failed: ' + e.message, 'bad'); } }
+    async function deleteLocation(spItemId) {
+        const [locations, assets] = await Promise.all([store.getAll('locations'), store.getAll('assets')]);
+        const l = locations.find(x => x._spItemId === spItemId); if (!l) return;
+        const using = assets.filter(a => a.locationId === l.locId).length;
+        const warn = using ? `\n\n${using} asset(s) still reference this location — they'll show as “unknown location” on Health until you move them.` : '';
+        if (!confirm(`Delete location “${l.locId}”?${warn}`)) return;
+        try { await store.remove('locations', spItemId); toast('Location deleted.', 'ok'); closeModal(); router(); } catch (e) { toast('Delete failed: ' + e.message, 'bad'); }
+    }
 
     /* ------------------------------------------------------------------ Licenses */
-    function licenseMonthlyCost(l) {
-        const cost = Number(l.unitCost) || 0, seats = Number(l.assignedSeats) || Number(l.totalSeats) || 0;
+    function licenseMonthlyCost(l, seatsOverride) {
+        const cost = Number(l.unitCost) || 0;
+        const seats = seatsOverride != null ? seatsOverride : (Number(l.assignedSeats) || Number(l.totalSeats) || 0);
         const factor = l.billingCycle === 'Annual' ? 1 / 12 : (l.billingCycle === 'One-time' ? 0 : 1);
         return cost * seats * factor;
     }
+    // How many per-person assignment rows exist for this license (the live "who holds it" count).
+    function licenseTracked(l, licenseAssignments) {
+        return licenseAssignments.filter(x => (l.skuPartNumber && x.skuPartNumber === l.skuPartNumber) || (l.product && x.product === l.product)).length;
+    }
+    // Effective assigned-seat count shown across the app: prefer the live per-person tally when we
+    // track people (so removing a person's license frees a seat everywhere); else the stored value.
+    function licenseAssigned(l, licenseAssignments) {
+        const tracked = licenseTracked(l, licenseAssignments);
+        const stored = Number(l.assignedSeats) || 0;
+        return (tracked > 0 || stored === 0) ? tracked : stored;
+    }
     async function renderLicensesPage(el) {
-        const licenses = await store.getAll('licenses');
+        const [licenses, la] = await Promise.all([store.getAll('licenses'), store.getAll('licenseAssignments')]);
         const now = Date.now();
-        const util = l => { const t = Number(l.totalSeats) || 0, a = Number(l.assignedSeats) || 0; return t ? Math.round(a / t * 100) : 0; };
         el.innerHTML = `
         <div class="page-head"><h1>Licenses &amp; subscriptions</h1>
           <div class="actions">
@@ -916,19 +934,21 @@
           <th>Product</th><th>Vendor</th><th>Type</th><th class="right">Seats</th><th>Utilization</th><th class="right">Unit</th><th class="right">Est. / mo</th><th>Renews</th><th>Actions</th>
         </tr></thead><tbody>
         ${licenses.sort((a, b) => a.product.localeCompare(b.product)).map(l => {
-            const u = util(l), t = Number(l.totalSeats) || 0, a = Number(l.assignedSeats) || 0;
+            const t = Number(l.totalSeats) || 0, a = licenseAssigned(l, la), stored = Number(l.assignedSeats) || 0;
+            const u = t ? Math.round(a / t * 100) : 0;
             const over = a > t && t > 0, renewSoon = l.renewalDate && new Date(l.renewalDate).getTime() <= now + 60 * 864e5;
             const barColor = over ? 'var(--bad)' : (u >= 90 ? 'var(--warn)' : 'var(--ok)');
+            const drift = stored > 0 && stored !== a ? ` <small class="muted" title="Stored/M365-reported seat count differs from people tracked">(M365: ${stored})</small>` : '';
             return `<tr>
               <td><strong>${esc(l.product)}</strong></td><td>${esc(l.vendor)}</td><td>${esc(l.licenseType)}</td>
-              <td class="right">${a} / ${t || '—'}</td>
+              <td class="right">${a} / ${t || '—'}${drift}</td>
               <td><div style="background:var(--panel2);border-radius:6px;height:8px;width:90px;overflow:hidden"><div style="height:8px;width:${Math.min(100, u)}%;background:${barColor}"></div></div><small class="muted">${u}%${over ? ' ⚠ over' : ''}</small></td>
-              <td class="right">${money(l.unitCost)}</td><td class="right">${money(Math.round(licenseMonthlyCost(l)))}</td>
+              <td class="right">${money(l.unitCost)}</td><td class="right">${money(Math.round(licenseMonthlyCost(l, a)))}</td>
               <td>${l.renewalDate ? `<span class="badge ${renewSoon ? 'b-warn' : 'b-mut'}">${fmtDate(l.renewalDate)}</span>` : '—'}</td>
               <td><button class="btn sm" onclick="openLicenseModal('${esc(l._spItemId)}')">Edit</button></td></tr>`;
         }).join('')}
         </tbody></table></div>
-        ${licenses.length ? `<p class="muted">Estimated total: <strong>${money(Math.round(licenses.reduce((s, l) => s + licenseMonthlyCost(l), 0)))}/mo</strong> · ${money(Math.round(licenses.reduce((s, l) => s + licenseMonthlyCost(l) * 12, 0)))}/yr (based on assigned seats).</p>` : '<div class="empty">No licenses yet. Add one, import a CSV, or run the O365 LicenseSync flow.</div>'}`;
+        ${licenses.length ? `<p class="muted">Estimated total: <strong>${money(Math.round(licenses.reduce((s, l) => s + licenseMonthlyCost(l, licenseAssigned(l, la)), 0)))}/mo</strong> · ${money(Math.round(licenses.reduce((s, l) => s + licenseMonthlyCost(l, licenseAssigned(l, la)) * 12, 0)))}/yr (based on seats assigned to people).</p>` : '<div class="empty">No licenses yet. Add one, import a CSV, or run the O365 LicenseSync flow.</div>'}`;
         const table = document.getElementById('licTable'); enableColumnFilters(table, 'licenses');
         document.getElementById('licSearch').addEventListener('input', e => { table._searchTerm = e.target.value; applyTableFilters(table); });
     }
@@ -1046,6 +1066,7 @@
         const [assets, assignments, locations, licenseAssignments, licenses] = await Promise.all([store.getAll('assets'), store.getAll('assignments'), store.getAll('locations'), store.getAll('licenseAssignments'), store.getAll('licenses')]);
         const _licKeys = _licenseCatalogKeys(licenses);
         const orphanLic = licenseAssignments.filter(x => _laIsOrphan(x, _licKeys));
+        const licSeatMismatch = licenses.filter(l => { const tracked = licenseTracked(l, licenseAssignments); const stored = Number(l.assignedSeats) || 0; return stored > 0 && tracked > 0 && stored !== tracked; });
         // duplicates
         const bySerial = {}, byTag = {};
         assets.forEach(a => { if (a.serialNumber) (bySerial[a.serialNumber] = bySerial[a.serialNumber] || []).push(a); (byTag[a.assetTag] = byTag[a.assetTag] || []).push(a); });
@@ -1074,6 +1095,7 @@
         ${section('Assignments for missing assets', 'b-bad', orphanAssign, () => `${orphanAssign.length > 1 ? `<p><button class="btn sm danger" onclick="cleanOrphanAssignments()">🧹 Remove all ${orphanAssign.length}</button></p>` : ''}` + orphanAssign.map(x => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0"><span>${esc(x.assetTag)} → ${esc(x.personName)} <span class="muted">(asset not found)</span></span><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></div>`).join(''))}
         ${section('Assets in an unknown location', 'b-warn', badLoc, () => badLoc.map(a => `<div>${link(a.assetTag)} → location “${esc(a.locationId)}” not in Locations</div>`).join(''))}
         ${section('License assignments for removed licenses', 'b-bad', orphanLic, () => `${orphanLic.length > 1 ? `<p><button class="btn sm danger" onclick="cleanOrphanLicenseAssignments()">🧹 Remove all ${orphanLic.length}</button></p>` : ''}` + orphanLic.map(x => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0"><span>${esc(x.personName || x.personUpn)} → ${esc(x.product || x.skuPartNumber)} <span class="muted">(license no longer exists)</span></span><button class="btn sm danger" onclick="deleteLicenseAssignment('${esc(x._spItemId)}')">Remove</button></div>`).join(''))}
+        ${section('License seat count mismatch (stored vs people tracked)', 'b-warn', licSeatMismatch, () => licSeatMismatch.map(l => `<div><a href="#/licenses">${esc(l.product)}</a> — stored “Assigned seats” = ${Number(l.assignedSeats)}, but ${licenseTracked(l, licenseAssignments)} people are tracked as holding it</div>`).join(''))}
         ${section('Deployed but no open custody record', 'b-warn', deployedNoOpen, () => deployedNoOpen.map(a => `<div>${link(a.assetTag)} — status Deployed, no open assignment</div>`).join(''))}
         <h3 class="muted">Completeness</h3>
         ${section('Deployed with no assignee', 'b-warn', deployedNoOwner, () => deployedNoOwner.map(a => `<div>${link(a.assetTag)}</div>`).join(''))}
