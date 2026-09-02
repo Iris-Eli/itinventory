@@ -961,7 +961,40 @@
         try { if (spItemId) await store.update('licenses', spItemId, obj); else await store.add('licenses', obj); toast('License saved.', 'ok'); closeModal(); router(); }
         catch (e) { toast('Save failed: ' + e.message, 'bad'); }
     }
-    async function deleteLicense(spItemId) { if (!confirm('Delete this license?')) return; try { await store.remove('licenses', spItemId); toast('Deleted.', 'ok'); closeModal(); router(); } catch (e) { toast('Delete failed: ' + e.message, 'bad'); } }
+    async function deleteLicense(spItemId) {
+        const [licenses, la] = await Promise.all([store.getAll('licenses'), store.getAll('licenseAssignments')]);
+        const l = licenses.find(x => x._spItemId === spItemId); if (!l) return;
+        const matches = la.filter(x => (l.skuPartNumber && x.skuPartNumber === l.skuPartNumber) || (l.product && x.product === l.product));
+        const extra = matches.length ? `\n\nThis will also remove ${matches.length} per-person assignment record(s) for this license.` : '';
+        if (!confirm(`Delete license "${l.product}"?${extra}`)) return;
+        try {
+            await store.remove('licenses', spItemId);
+            for (const x of matches) await store.remove('licenseAssignments', x._spItemId);
+            toast(`License deleted${matches.length ? ` + ${matches.length} assignment(s)` : ''}.`, 'ok'); closeModal(); router();
+        } catch (e) { toast('Delete failed: ' + e.message, 'bad'); }
+    }
+    async function deleteLicenseAssignment(spItemId) {
+        if (!confirm('Remove this license assignment? (Does not change the license catalog.)')) return;
+        try { await store.remove('licenseAssignments', spItemId); toast('License assignment removed.', 'ok'); router(); }
+        catch (e) { toast('Remove failed: ' + e.message, 'bad'); }
+    }
+    function _licenseCatalogKeys(licenses) {
+        return { skus: new Set(licenses.filter(l => l.skuPartNumber).map(l => l.skuPartNumber)), prods: new Set(licenses.filter(l => l.product).map(l => l.product)) };
+    }
+    function _laIsOrphan(x, keys) {
+        const skuOk = x.skuPartNumber && keys.skus.has(x.skuPartNumber);
+        const prodOk = x.product && keys.prods.has(x.product);
+        return !skuOk && !prodOk;
+    }
+    async function cleanOrphanLicenseAssignments() {
+        const [la, licenses] = await Promise.all([store.getAll('licenseAssignments'), store.getAll('licenses')]);
+        const keys = _licenseCatalogKeys(licenses);
+        const orphans = la.filter(x => _laIsOrphan(x, keys));
+        if (!orphans.length) { toast('No orphan license assignments.', 'ok'); return; }
+        if (!confirm(`Remove ${orphans.length} license assignment(s) whose license no longer exists?`)) return;
+        let n = 0; for (const x of orphans) { try { await store.remove('licenseAssignments', x._spItemId); n++; } catch (e) { } }
+        toast(`Removed ${n} orphan license assignment(s).`, 'ok'); router();
+    }
 
     /* -------------------------------------------------------------------- People */
     function personKeyOf(name, upn) { return (upn || name || '').toLowerCase(); }
@@ -991,6 +1024,7 @@
         const myLic = lic.filter(match);
         const skuCost = sku => { const c = catalog.find(x => x.skuPartNumber && x.skuPartNumber === sku); return c ? licenseMonthlyCost({ ...c, assignedSeats: 1, totalSeats: 1 }) : 0; };
         const myLicMonthly = myLic.reduce((s, a) => s + skuCost(a.skuPartNumber), 0);
+        const _pKeys = _licenseCatalogKeys(catalog);
         const person = mine[0] || myLic[0] || { personName: decodeURIComponent(key), personUpn: '' };
         const name = person.personName || person.personUpn;
         const assetByTag = t => assets.find(a => a.assetTag === t);
@@ -1003,13 +1037,15 @@
           <div class="tile"><div class="k">Est. license cost</div><div class="v">${money(Math.round(myLicMonthly)) || '$0'}</div><div class="sub">per month, reclaimable</div></div>
         </div>
         <div class="panel"><h2>💻 Currently held hardware (offboarding checklist)</h2><div class="body">${openHeld.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Category</th><th>Model</th><th>Since</th><th>Action</th></tr></thead><tbody>${openHeld.map(a => { const as = assetByTag(a.assetTag); return `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${esc(as?.category || '')}</td><td>${esc(as?.model || '')}</td><td>${fmtDate(a.issuedDate)}</td><td>${as ? `<button class="btn sm" onclick="checkInAsset('${esc(a.assetTag)}')">Check in</button>` : '<span class="muted">asset missing</span>'}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No hardware currently held. ✓</div>'}</div></div>
-        <div class="panel"><h2>🔑 Assigned licenses</h2><div class="body">${myLic.length ? `<div class="table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>Assigned</th></tr></thead><tbody>${myLic.map(a => `<tr><td>${esc(a.product)}</td><td>${esc(a.skuPartNumber)}</td><td>${fmtDate(a.assignedDate)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No licenses recorded for this person. (Run the O365 LicenseSync flow to auto-populate.)</div>'}</div></div>
+        <div class="panel"><h2>🔑 Assigned licenses</h2><div class="body">${myLic.length ? `<div class="table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>Assigned</th><th>Actions</th></tr></thead><tbody>${myLic.map(a => { const orphan = _laIsOrphan(a, _pKeys); return `<tr><td>${esc(a.product)}${orphan ? ' <span class="badge b-bad">license removed</span>' : ''}</td><td>${esc(a.skuPartNumber)}</td><td>${fmtDate(a.assignedDate)}</td><td class="nowrap"><button class="btn sm danger" onclick="deleteLicenseAssignment('${esc(a._spItemId)}')">Remove</button></td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No licenses recorded for this person. (Run the O365 LicenseSync flow to auto-populate.)</div>'}</div></div>
         <div class="panel"><h2>🔄 Full custody history</h2><div class="body">${mine.length ? `<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Issued</th><th>Returned</th></tr></thead><tbody>${mine.sort((p, q) => new Date(q.issuedDate) - new Date(p.issuedDate)).map(a => `<tr><td><a href="#/asset/${encodeURIComponent(a.assetTag)}">${esc(a.assetTag)}</a></td><td>${fmtDate(a.issuedDate)}</td><td>${a.returnedDate ? fmtDate(a.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No custody records.</div>'}</div></div>`;
     }
 
     /* -------------------------------------------------------------------- Health */
     async function renderHealthPage(el) {
-        const [assets, assignments, locations] = await Promise.all([store.getAll('assets'), store.getAll('assignments'), store.getAll('locations')]);
+        const [assets, assignments, locations, licenseAssignments, licenses] = await Promise.all([store.getAll('assets'), store.getAll('assignments'), store.getAll('locations'), store.getAll('licenseAssignments'), store.getAll('licenses')]);
+        const _licKeys = _licenseCatalogKeys(licenses);
+        const orphanLic = licenseAssignments.filter(x => _laIsOrphan(x, _licKeys));
         // duplicates
         const bySerial = {}, byTag = {};
         assets.forEach(a => { if (a.serialNumber) (bySerial[a.serialNumber] = bySerial[a.serialNumber] || []).push(a); (byTag[a.assetTag] = byTag[a.assetTag] || []).push(a); });
@@ -1037,6 +1073,7 @@
         ${section('Duplicate asset tags', 'b-bad', dupTag, () => dupTag.map(([t, v]) => `<div>Tag <strong>${esc(t)}</strong> appears ${v.length}×</div>`).join(''))}
         ${section('Assignments for missing assets', 'b-bad', orphanAssign, () => `${orphanAssign.length > 1 ? `<p><button class="btn sm danger" onclick="cleanOrphanAssignments()">🧹 Remove all ${orphanAssign.length}</button></p>` : ''}` + orphanAssign.map(x => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0"><span>${esc(x.assetTag)} → ${esc(x.personName)} <span class="muted">(asset not found)</span></span><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></div>`).join(''))}
         ${section('Assets in an unknown location', 'b-warn', badLoc, () => badLoc.map(a => `<div>${link(a.assetTag)} → location “${esc(a.locationId)}” not in Locations</div>`).join(''))}
+        ${section('License assignments for removed licenses', 'b-bad', orphanLic, () => `${orphanLic.length > 1 ? `<p><button class="btn sm danger" onclick="cleanOrphanLicenseAssignments()">🧹 Remove all ${orphanLic.length}</button></p>` : ''}` + orphanLic.map(x => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0"><span>${esc(x.personName || x.personUpn)} → ${esc(x.product || x.skuPartNumber)} <span class="muted">(license no longer exists)</span></span><button class="btn sm danger" onclick="deleteLicenseAssignment('${esc(x._spItemId)}')">Remove</button></div>`).join(''))}
         ${section('Deployed but no open custody record', 'b-warn', deployedNoOpen, () => deployedNoOpen.map(a => `<div>${link(a.assetTag)} — status Deployed, no open assignment</div>`).join(''))}
         <h3 class="muted">Completeness</h3>
         ${section('Deployed with no assignee', 'b-warn', deployedNoOwner, () => deployedNoOwner.map(a => `<div>${link(a.assetTag)}</div>`).join(''))}
