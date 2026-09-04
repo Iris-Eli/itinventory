@@ -169,7 +169,8 @@
             assignments: {
                 key: 'Title', assetTag: 'AssetTag', personName: 'PersonName', personUpn: 'PersonUPN',
                 personAadId: 'PersonAADId', issuedDate: 'IssuedDate', returnedDate: 'ReturnedDate',
-                conditionOut: 'ConditionOut', conditionIn: 'ConditionIn', issuedBy: 'IssuedBy', notes: 'Notes'
+                conditionOut: 'ConditionOut', conditionIn: 'ConditionIn', issuedBy: 'IssuedBy',
+                receiptSentDate: 'ReceiptSentDate', receiptTo: 'ReceiptTo', notes: 'Notes'
             },
             sparing: { key: 'Title', category: 'Category', model: 'Model', minQty: 'MinQty', targetQty: 'TargetQty', notes: 'Notes' },
             locations: { locId: 'Title', locType: 'LocType', address: 'Address', notes: 'Notes' },
@@ -191,7 +192,7 @@
         // Numeric/date columns: '' must become null on write (Graph rejects '' for these types).
         nonTextCols: new Set(['PurchaseCost','SalvageValue','DepreciationYears','MinQty','TargetQty',
             'AssignedDate','PurchaseDate','WarrantyExpiration','RetiredDate','IssuedDate','ReturnedDate',
-            'TotalSeats','AssignedSeats','UnitCost','RenewalDate']),
+            'TotalSeats','AssignedSeats','UnitCost','RenewalDate','ReceiptSentDate']),
         cacheTimeout: 5 * 60 * 1000
     };
 
@@ -347,6 +348,13 @@
     function statusBadge(s) {
         const map = { 'In Stock': 'b-info', 'Deployed': 'b-ok', 'In Repair': 'b-warn', 'Spare': 'b-info', 'Reserved': 'b-mut', 'Retired': 'b-mut', 'Lost': 'b-bad', 'Disposed': 'b-bad' };
         return `<span class="badge ${map[s] || 'b-mut'}">${esc(s || '—')}</span>`;
+    }
+    // Checkout-receipt email status for a custody row (stamped by the CheckoutReceipt flow).
+    function receiptBadge(x) {
+        if (x.receiptSentDate) return `<span class="badge b-ok" title="Emailed ${esc(x.receiptTo || x.personUpn)}">📧 ${fmtDate(x.receiptSentDate)}</span>`;
+        if (!x.personUpn) return '<span class="muted" title="No email address on file">no email</span>';
+        if (x.returnedDate) return '<span class="muted">—</span>';
+        return '<span class="badge b-mut" title="Receipt flow will email on next run">pending</span>';
     }
 
     /* ------------------------------------------------------------------- finance */
@@ -668,7 +676,7 @@
             ${row('Warranty expires', fmtDate(a.warrantyExpiration))}
           </table></div></div>
         </div>
-        <div class="panel"><h2>🔄 Custody history</h2><div class="body">${hist.length ? `<div class="table-wrap"><table><thead><tr><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th><th>Actions</th></tr></thead><tbody>${hist.map(x => `<tr><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td>${fmtDate(x.issuedDate)}</td><td>${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td><td class="nowrap"><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No custody records yet.</div>'}</div></div>
+        <div class="panel"><h2>🔄 Custody history</h2><div class="body">${hist.length ? `<div class="table-wrap"><table><thead><tr><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th><th>Receipt</th><th>Actions</th></tr></thead><tbody>${hist.map(x => `<tr><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td>${fmtDate(x.issuedDate)}</td><td>${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td><td class="nowrap">${receiptBadge(x)}</td><td class="nowrap"><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No custody records yet.</div>'}</div></div>
         ${disp.length ? `<div class="panel"><h2>🗑️ Disposal / data-wipe</h2><div class="body"><div class="table-wrap"><table><thead><tr><th>Retired</th><th>Method</th><th>Data wipe</th><th>Wipe method</th><th>Cert</th><th>By</th></tr></thead><tbody>${disp.map(d => `<tr><td>${fmtDate(d.retiredDate)}</td><td>${esc(d.disposalMethod)}</td><td>${esc(d.dataWipeStatus)}</td><td>${esc(d.dataWipeMethod)}</td><td>${esc(d.certRef)}</td><td>${esc(d.disposedBy)}</td></tr>`).join('')}</tbody></table></div></div></div>` : ''}`;
     }
 
@@ -812,8 +820,8 @@
         el.innerHTML = `
         <div class="page-head"><h1>Assignments</h1><div class="muted">${assignments.length} custody records · ${assignments.filter(x => !x.returnedDate).length} currently out</div></div>
         <div class="toolbar"><input class="search" id="asgSearch" placeholder="🔎 Search…"></div>
-        <div class="table-wrap panel"><table id="asgTable" class="js-colfilter"><thead><tr><th>Asset</th><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th><th>Actions</th></tr></thead><tbody>
-        ${sorted.map(x => { const missing = !assetTags.has(x.assetTag); return `<tr><td class="nowrap">${missing ? `${esc(x.assetTag)} <span class="badge b-bad">deleted</span>` : `<a href="#/asset/${encodeURIComponent(x.assetTag)}">${esc(x.assetTag)}</a>`}</td><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td class="nowrap">${fmtDate(x.issuedDate)}</td><td class="nowrap">${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td><td class="nowrap"><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></td></tr>`; }).join('')}
+        <div class="table-wrap panel"><table id="asgTable" class="js-colfilter"><thead><tr><th>Asset</th><th>Person</th><th>Issued</th><th>Returned</th><th>Out</th><th>In</th><th>By</th><th>Receipt</th><th>Actions</th></tr></thead><tbody>
+        ${sorted.map(x => { const missing = !assetTags.has(x.assetTag); return `<tr><td class="nowrap">${missing ? `${esc(x.assetTag)} <span class="badge b-bad">deleted</span>` : `<a href="#/asset/${encodeURIComponent(x.assetTag)}">${esc(x.assetTag)}</a>`}</td><td>${esc(x.personName)}<br><small class="muted">${esc(x.personUpn)}</small></td><td class="nowrap">${fmtDate(x.issuedDate)}</td><td class="nowrap">${x.returnedDate ? fmtDate(x.returnedDate) : '<span class="badge b-ok">Out now</span>'}</td><td>${esc(x.conditionOut)}</td><td>${esc(x.conditionIn)}</td><td>${esc(x.issuedBy)}</td><td class="nowrap">${receiptBadge(x)}</td><td class="nowrap"><button class="btn sm danger" onclick="deleteAssignment('${esc(x._spItemId)}')">Remove</button></td></tr>`; }).join('')}
         </tbody></table></div>
         ${assignments.length ? '' : '<div class="empty">No assignments yet. Check out an asset to create custody history.</div>'}`;
         const table = document.getElementById('asgTable'); enableColumnFilters(table, 'assignments');
